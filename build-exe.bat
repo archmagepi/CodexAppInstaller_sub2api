@@ -2,6 +2,8 @@
 setlocal
 rem Build CodexAppInstaller.exe from CodexAppInstaller.cs (self-contained C#)
 rem Requires .NET Framework 4.x compiler + PowerShell SDK (both ship with Windows).
+rem Extra refs: System.IO.Compression(.FileSystem) for zip extract,
+rem             System.Web.Extensions for JavaScriptSerializer (JSON parsing).
 
 set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe"
@@ -18,7 +20,7 @@ if not exist "%PSDLL%" (
 )
 
 cd /d "%~dp0"
-"%CSC%" /nologo /target:exe /optimize /platform:x64 /out:CodexAppInstaller.exe /r:"%PSDLL%" CodexAppInstaller.cs
+"%CSC%" /nologo /target:exe /optimize /platform:x64 /win32icon:xode-logo.ico /out:CodexAppInstaller.exe /r:"%PSDLL%" /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll CodexAppInstaller.cs
 if errorlevel 1 (
     echo [ERROR] compile failed.
     exit /b 1
