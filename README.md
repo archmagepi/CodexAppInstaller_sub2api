@@ -9,9 +9,9 @@ Windows 上绕过网络限制，一键安装并配置 Codex App——即 **ChatG
 1. 登录 sub2api 站点验证账号（站点固定为 `https://hub.xodeai.com`）
 2. 自动下载 Codex MSIX（镜像加速，SHA256 校验，带缓存）并静默安装
 3. 自动创建/复用 API Key「codex桌面端」（站点后台可见）
-4. 按 sub2api 官方模板写入 `~/.codex/config.toml`：联网搜索=live、**Full Access**、记忆=开、启动更新检查=关
+4. 按 sub2api 官方模板写入 `~/.codex/config.toml`（合并式生成，保留已装插件与自定义配置）：联网搜索=live、**Full Access**、记忆=开、启动更新检查=关
 5. 汉化（双轨自适应）：新版 Codex → [汉化启动器](https://github.com/shibaweidu/codex-desktop-zh)（原生 i18n 注入）；旧版 → [codex-zh-CN](https://github.com/xqnode/codex-zh-CN) 补丁副本（含兼容补丁），均走国内线路
-6. 内置插件市场（[暴喵 Codex 插件市场](https://github.com/tetexu1994-star/baomiao-codex-skills-marketplace)，78 个中文插件国内直连安装，版本锁定）
+6. 内置统一插件市场「Codex 插件」——192 个官方插件全量汉化（[kael-odin/codex-plugins-zh](https://github.com/kael-odin/codex-plugins-zh)）+ 暴喵精选「中文学术研究工具箱」（[baomiao-codex-skills-marketplace](https://github.com/tetexu1994-star/baomiao-codex-skills-marketplace)），国内直连安装，版本锁定
 7. Xode AI 品牌化：安装器图标/窗口标题、桌面图标、启动器图标
 8. 桌面快捷方式直接指向汉化目标（启动器/补丁副本），无启动脚本
 9. 输出使用说明
@@ -101,15 +101,12 @@ model = "gpt-5.6-luna"              # 来自站点模型目录
 review_model = "gpt-5.6-luna"
 web_search = "live"                 # 联网搜索=live
 model_reasoning_effort = "medium"   # 站点目录默认推理档
-disable_response_storage = true
-network_access = "enabled"
-windows_wsl_setup_acknowledged = true
 check_for_update_on_startup = false # 关闭启动更新检查（步骤 10）
 approval_policy = "never"           # Full Access（步骤 7）
 sandbox_mode = "danger-full-access"
 
 [model_providers.OpenAI]
-name = "OpenAI"
+name = "Xode AI"
 base_url = "https://hub.xodeai.com/v1"
 model_catalog_url = "https://hub.xodeai.com/v1/models"
 requires_openai_auth = false
@@ -122,6 +119,8 @@ image_generation = true
 goals = true
 memories = true                     # 记忆（步骤 8）
 ```
+
+配置生成是**合并式**的：安装器只重写自己托管的键与段（顶层权限/搜索/更新键、`[model_providers.*]`、`[profiles.g*]`、`[features]`），其余内容（用户已装插件的登记 `[plugins.*]`、自定义 `[mcp_servers.*]`、`[marketplaces.*]`、`[desktop]` 等）原样保留——**重跑安装器不会丢失已安装的插件和自定义 MCP 配置**。历史版本的 3 个死键（`disable_response_storage`/`network_access`/`windows_wsl_setup_acknowledged`，桌面端不识别、触发「is ignored」警告）已停止写入并在重跑时自动清除。
 
 ### 5. 汉化（双轨自适应）
 
@@ -143,14 +142,21 @@ memories = true                     # 记忆（步骤 8）
 
 ### 6. 插件市场（中国内地直连 · 中文 · 版本锁定）
 
-安装器内置 **「暴喵 Codex 插件市场」**——[tetexu1994-star/baomiao-codex-skills-marketplace](https://github.com/tetexu1994-star/baomiao-codex-skills-marketplace)（中文社区维护，**78 个插件**，内容持续更新）：
+安装器内置**一个统一市场「Codex 插件」**（本地目录源，插件页只显示一个市场），由两个来源合成，共 **193 个插件**：
 
-- **版本锁定 commit**（cb69c4a7），zip 经 gh-proxy 国内线路下载（约 4.5 MB，带缓存），解压到 `%LOCALAPPDATA%\CodexAppInstaller\mp`
+- **官方插件全量汉化** —— 基于 [kael-odin/codex-plugins-zh](https://github.com/kael-odin/codex-plugins-zh)（openai/plugins 官方市场的无损汉化镜像，192 个官方插件，含分类中文检索）
+- **暴喵精选** —— 从 [baomiao-codex-skills-marketplace](https://github.com/tetexu1994-star/baomiao-codex-skills-marketplace)（中文社区市场，78 个插件）中并入 `academic-research-toolkit`（中文学术研究工具箱）
+
+机制：
+
+- **自动更新 + 本地版本管理**：每次重跑安装器先查询各来源仓库的最新 commit（GitHub API：直连 + gh-proxy 回退），与本地已装版本（`mp\<来源>.version` 记录）比对——**版本相同则完全跳过下载/解压/合并（零写入）**；版本变化才下载换装（旧目录与旧缓存自动清理）。API 查询失败时回退本地已装版本（无网络也不破坏现状），首次安装回退内置兜底 commit
+- 归档下载走 gh-proxy 国内线路（约 72 MB / 约 4.5 MB），**原子写入**（.part → 改名，中断不留残缺文件）+ zip 完整性校验（残缺缓存自动删除重下），解压到 `%LOCALAPPDATA%\CodexAppInstaller\mp` 后合成市场：官方全量 + 复制暴喵精选插件目录 + manifest 合并（市场 ID `codex-plugins`，显示名「Codex 插件」）
+- 官方中文版解压后自动删除仓库携带的 `site/` 网页资源（约 35 MB，Codex 用不到）
 - 解压用系统内置 `tar.exe`（仓库含超长嵌套路径，.NET ZipFile 会失败，tar 原生支持长路径）
-- 注册方式与官方 CLI 一致（config.toml 的 `[marketplaces.baomiao-codex]` 本地目录源，市场 ID 从 marketplace.json 动态读取）
-- **安装任何插件零外网依赖**：应用插件页浏览 → 安装，全部从本地市场目录复制
-- 旧市场注册（awesome-codex-plugins / openai-curated-zh）自动清理
-- 应用重启后在插件页即可看到该市场
+- 注册方式与官方 CLI 一致（config.toml 的 `[marketplaces.codex-plugins]` 本地目录源；重复安装自动刷新 source 路径并合并新清单）。精选插件**置顶列表第一位**，并补充 ASCII 关键词（academic/research）供英文检索——应用搜索框的规范化逻辑会丢弃全部中文字符（上游缺陷：中文查询等于列出全部插件，官方插件同样如此），中文关键词无法参与匹配
+- **安装任何插件零外网依赖**：应用插件页浏览 → 安装，全部从本地市场目录复制（其中 crowdstrike/qodo 三个条目为外部仓库引用，安装时需外网）
+- 此前的市场注册（awesome-codex-plugins / openai-curated-zh / a-openai-curated-zh / baomiao-codex）自动清理迁移
+- 应用重启后在插件页即可看到「Codex 插件」市场
 
 ### 7. 手动模式回退
 

@@ -995,10 +995,12 @@ namespace CodexAppInstaller
             Console.WriteLine("  下载中: " + desc + " (" + url + ")");
             Stopwatch sw = Stopwatch.StartNew();
             bool ok = false;
+            // 原子写入：先写 .part，成功后整体改名——失败/中断不污染目标路径
+            string part = dest + ".part";
             for (int attempt = 1; attempt <= 3 && !ok; attempt++)
             {
                 HttpWebRequest req = null; HttpWebResponse resp = null; Stream stream = null; FileStream fs = null;
-                if (File.Exists(dest)) File.Delete(dest);
+                if (File.Exists(part)) File.Delete(part);
                 try
                 {
                     req = (HttpWebRequest)WebRequest.Create(url);
@@ -1009,7 +1011,7 @@ namespace CodexAppInstaller
                     resp = (HttpWebResponse)req.GetResponse();
                     long total = resp.ContentLength;
                     stream = resp.GetResponseStream();
-                    fs = File.Create(dest);
+                    fs = File.Create(part);
                     byte[] buf = new byte[65536];
                     long done = 0, lastBytes = 0;
                     DateTime lastTick = DateTime.Now;
@@ -1030,6 +1032,8 @@ namespace CodexAppInstaller
                     }
                     Console.WriteLine();
                     fs.Close(); stream.Close(); resp.Close();
+                    if (File.Exists(dest)) File.Delete(dest);
+                    File.Move(part, dest);
                     ok = true;
                 }
                 catch (Exception ex)
@@ -1039,11 +1043,12 @@ namespace CodexAppInstaller
                     try { if (fs != null) fs.Close(); } catch { }
                     try { if (stream != null) stream.Close(); } catch { }
                     try { if (resp != null) resp.Close(); } catch { }
+                    try { File.Delete(part); } catch { }
                     if (attempt < 3) Thread.Sleep(2000);
                 }
             }
             sw.Stop();
-            if (!ok) { if (File.Exists(dest)) File.Delete(dest); return false; }
+            if (!ok) { if (File.Exists(part)) File.Delete(part); return false; }
             if (!File.Exists(dest)) { Fail("下载失败: 文件不存在"); return false; }
             long size = new FileInfo(dest).Length;
             if (size < minBytes) { Fail("下载异常: 文件过小 (" + size + " bytes)"); File.Delete(dest); return false; }
@@ -1564,9 +1569,6 @@ namespace CodexAppInstaller
             sb.AppendLine("web_search = \"live\"");
             if (!string.IsNullOrEmpty(primary.Effort) && primary.Effort != "none")
                 sb.AppendLine("model_reasoning_effort = \"" + EscapeToml(primary.Effort) + "\"");
-            sb.AppendLine("disable_response_storage = true");
-            sb.AppendLine("network_access = \"enabled\"");
-            sb.AppendLine("windows_wsl_setup_acknowledged = true");
             sb.AppendLine("check_for_update_on_startup = false");
             sb.AppendLine("approval_policy = \"never\"");
             sb.AppendLine("sandbox_mode = \"danger-full-access\"");
@@ -1598,8 +1600,111 @@ namespace CodexAppInstaller
                 if (!string.IsNullOrEmpty(ki.Effort) && ki.Effort != "none")
                     sb.AppendLine("model_reasoning_effort = \"" + EscapeToml(ki.Effort) + "\"");
             }
-            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false)); // 无 BOM：严格 TOML 解析器不接受 BOM
-            Ok("已写入 " + keys.Count + " 个分组 provider: " + path);
+            // 保留用户/应用自己的配置段（已装插件登记 [plugins.*]、[mcp_servers.*]、[marketplaces.*]、
+            // [desktop] 等），避免重跑安装器抹掉已安装插件与自定义设置。托管段整段重写为最新值。
+            string preserved = CollectPreservedTomlBlocks(path);
+            if (preserved.Length > 0) sb.AppendLine();
+            File.WriteAllText(path, sb.ToString() + preserved, new UTF8Encoding(false)); // 无 BOM：严格 TOML 解析器不接受 BOM
+            Ok("已写入 " + keys.Count + " 个分组 provider: " + path + (preserved.Length > 0 ? "（已保留既有插件/自定义配置）" : ""));
+        }
+
+        // 安装器托管的顶层键：每次重写为最新值，不从旧文件保留
+        private static readonly string[] ManagedTopLevelKeys = new string[] {
+            "model_provider", "model", "review_model", "web_search", "model_reasoning_effort",
+            "check_for_update_on_startup", "approval_policy", "sandbox_mode",
+            // 历史版本写入、桌面端不识别的死键：直接丢弃（消除「is ignored」警告）
+            "disable_response_storage", "network_access", "windows_wsl_setup_acknowledged"
+        };
+
+        // 安装器托管的 TOML 区块：整段重写，不从旧文件保留
+        private static bool IsManagedSection(string header)
+        {
+            return header.StartsWith("[model_providers.")
+                || header.StartsWith("[profiles.g")
+                || header == "[features]";
+        }
+
+        private static int TomlBracketDelta(string s)
+        {
+            int d = 0; bool inStr = false;
+            foreach (char c in s)
+            {
+                if (c == '"') inStr = !inStr;
+                if (inStr) continue;
+                if (c == '[' || c == '{') d++;
+                else if (c == ']' || c == '}') d--;
+            }
+            return d;
+        }
+
+        // 从旧 config.toml 提取安装器不管辖的部分（按区块划分：顶层键行 + 各 [section] 块）
+        private static string CollectPreservedTomlBlocks(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return "";
+                string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+                StringBuilder outSb = new StringBuilder();
+                string curHeader = null;
+                List<string> block = new List<string>();
+                int depth = 0; bool skipping = false; // 顶层多行值的状态机
+                Action flush = delegate
+                {
+                    if (block.Count == 0) return;
+                    // 自愈：跳过历史版本残留的孤立引号行（单独一个 ' 永远不是合法 TOML）
+                    for (int i = block.Count - 1; i >= 0; i--)
+                    {
+                        string tt = block[i].Trim();
+                        if (tt.Length > 0 && tt.Trim('\'').Length == 0) block.RemoveAt(i);
+                    }
+                    if (curHeader == null)
+                    {
+                        foreach (string l in block)
+                        {
+                            string t = l.Trim();
+                            if (t.Length == 0 || t.StartsWith("#")) { if (!skipping) outSb.AppendLine(l); continue; }
+                            int eq = t.IndexOf('=');
+                            if (depth == 0 && eq > 0)
+                            {
+                                string key = t.Substring(0, eq).Trim().Trim('"').Trim('\'').ToLowerInvariant();
+                                bool managed = false;
+                                foreach (string mk in ManagedTopLevelKeys) if (mk == key) { managed = true; break; }
+                                depth = Math.Max(0, TomlBracketDelta(t));
+                                if (managed) { skipping = true; continue; }
+                                skipping = false;
+                                outSb.AppendLine(l);
+                                if (depth > 0) skipping = false; // 未托管键的续行保留
+                            }
+                            else
+                            {
+                                depth += TomlBracketDelta(t);
+                                if (!skipping) outSb.AppendLine(l);
+                                if (depth <= 0) { depth = 0; skipping = false; }
+                            }
+                        }
+                    }
+                    else if (!IsManagedSection(curHeader))
+                    {
+                        foreach (string l in block) outSb.AppendLine(l);
+                    }
+                    block.Clear();
+                };
+                foreach (string line in lines)
+                {
+                    string t = line.Trim();
+                    if (depth == 0 && t.StartsWith("[") && t.EndsWith("]"))
+                    {
+                        flush();
+                        curHeader = t;
+                        block.Add(line);
+                        continue;
+                    }
+                    block.Add(line);
+                }
+                flush();
+                return outSb.ToString();
+            }
+            catch (Exception ex) { Warn("保留旧配置段失败（已忽略，配置将整文件重写）: " + Trunc(ex.Message)); return ""; }
         }
 
         // ~/.codex/auth.json 存 API Key（保险项：sub2api api-key 模式密钥内联于 config.toml，
@@ -1851,8 +1956,29 @@ namespace CodexAppInstaller
 // 中国社区维护的「Codex 官方插件 · 中文版」市场（kael-odin/codex-plugins-zh）：
 // 192 个官方插件、中文分类、i18n/zh 覆盖层，社区持续更新。
 // 注册为本地目录市场（config.toml 的 [marketplaces.<id>]，与官方 CLI 一致），安装插件零外网依赖。
-        private const string PluginMarketplaceRepo = "tetexu1994-star/baomiao-codex-skills-marketplace";
-        private const string PluginMarketplaceCommit = "cb69c4a7e42ddb85227e6f61cc9eb7bf9e1b7df5";
+        // 插件市场：两个来源合成一个统一市场「Codex 插件」
+        //   基础 = kael-odin/codex-plugins-zh（openai/plugins 官方市场无损汉化镜像）
+        //   增补 = 暴喵市场精选插件（BaoMiaoPickedPlugins）
+        // 版本管理：运行时查询各仓库最新 commit，与本地已装版本（mp\<prefix>.version）比对——
+        //   版本相同 → 完全跳过下载/解压/合并；版本变化或首次安装 → 下载换装并记录新版本
+        private class MarketSpec
+        {
+            public string Repo, Branch, CachePrefix, SizeDesc;
+            public long MinSize;
+            public string BootstrapCommit;   // 查询 API 失败且本地无版本记录时的兜底版本
+            public string ResolvedCommit;    // 运行时解析出的目标 commit
+        }
+        private static readonly MarketSpec[] Markets = new MarketSpec[] {
+            new MarketSpec { Repo = "kael-odin/codex-plugins-zh", Branch = "main", CachePrefix = "kzh", SizeDesc = "约 72 MB", MinSize = 50000000, BootstrapCommit = "e3091d1b371a9dcd9455d333175f948b286fdfcf" },
+            new MarketSpec { Repo = "tetexu1994-star/baomiao-codex-skills-marketplace", Branch = "main", CachePrefix = "baomiao", SizeDesc = "约 4.5 MB", MinSize = 2000000, BootstrapCommit = "cb69c4a7e42ddb85227e6f61cc9eb7bf9e1b7df5" }
+        };
+        private const string MergedMarketId = "codex-plugins";
+        private const string MergedMarketDisplay = "Codex 插件";
+        // 从暴喵市场并入的精选插件（name = 暴喵 marketplace.json 的插件 name 字段）
+        private static readonly string[] BaoMiaoPickedPlugins = new string[] { "academic-research-toolkit" };
+        // 精选插件补充的 ASCII 检索关键词：应用搜索规范化会丢弃全部非 [a-z0-9] 字符
+        // （中文查询退化为空串 → 匹配一切），ASCII 关键词让英文检索可精准命中
+        private static readonly string[] PickedExtraKeywords = new string[] { "academic", "research", "paper", "literature", "toolkit" };
         private static bool PluginMarketplaceOk;
 
         private static bool EnsurePluginMarketplace()
@@ -1861,27 +1987,131 @@ namespace CodexAppInstaller
             {
                 string configPath = CodexHomePath("config.toml");
                 string cfg = File.Exists(configPath) ? File.ReadAllText(configPath, Encoding.UTF8) : "";
-                // 清理旧市场注册（awesome-codex-plugins / openai-curated-zh）
-                cfg = Regex.Replace(cfg, "\r?\n?\\[marketplaces\\.awesome-codex-plugins\\]\r?\n?source_type = \"local\"\r?\n?source = '[^'\r\n]*", "");
-                cfg = Regex.Replace(cfg, "\r?\n?\\[marketplaces\\.openai-curated-zh\\]\r?\n?source_type = \"local\"\r?\n?source = '[^'\r\n]*", "");
-                Step("8/11 插件市场（中国内地直连 · 版本锁定）");
+                // 清理旧方案市场注册（awesome 国际版 / 此前的双市场布局 → 统一为合并市场 codex-plugins）
+                // 注意：source 的闭合引号必须一并消费，否则留下孤立 ' 行破坏 TOML 解析
+                foreach (string oldId in new string[] { "awesome-codex-plugins", "openai-curated-zh", "a-openai-curated-zh", "baomiao-codex" })
+                    cfg = Regex.Replace(cfg, "\r?\n?\\[marketplaces\\." + Regex.Escape(oldId) + "\\]\r?\n?source_type = \"local\"\r?\n?source = '[^'\r\n]*'", "");
+                Step("8/11 插件市场（中国内地直连 · 自动更新 · " + MergedMarketDisplay + "）");
                 Directory.CreateDirectory(CacheDir);
-                string zipPath = Path.Combine(CacheDir, "baomiao-" + PluginMarketplaceCommit.Substring(0, 8) + ".zip");
-                if (!File.Exists(zipPath) || new FileInfo(zipPath).Length < 2000000)
-                {
-                    bool dl = false;
-                    foreach (string prefix in ZhCnSources())
-                    {
-                        string url = prefix + "/" + PluginMarketplaceRepo + "/archive/" + PluginMarketplaceCommit + ".zip";
-                        Step("尝试下载源: " + prefix);
-                        if (DownloadFile(url, zipPath, "中文插件市场 暴喵 Codex（约 4.5 MB）", 2000000)) { dl = true; break; }
-                    }
-                    if (!dl) throw new Exception("插件市场所有下载源均失败");
-                }
                 string mpRoot = Path.Combine(Path.GetDirectoryName(CacheDir), "mp");
                 Directory.CreateDirectory(mpRoot);
-                // 用系统内置 tar.exe 解压：仓库含超长嵌套路径，.NET ZipFile/路径 API 会失败，tar 原生支持长路径
+                // 清理旧方案遗留目录（旧分支归档布局）
+                foreach (string oldDir in new string[] { Path.Combine(mpRoot, "codex-plugins-zh-main"), Path.Combine(mpRoot, "awesome-codex-plugins-main") })
+                    if (Directory.Exists(oldDir)) { try { Directory.Delete(oldDir, true); } catch { } }
                 string tarExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
+                int okCount = 0;
+                foreach (MarketSpec m in Markets)
+                {
+                    try
+                    {
+                        string localVer = ReadMarketVersion(mpRoot, m.CachePrefix);
+                        string target = GetLatestCommit(m.Repo, m.Branch);
+                        if (string.IsNullOrEmpty(target))
+                        {
+                            target = !string.IsNullOrEmpty(localVer) ? localVer : m.BootstrapCommit;
+                            Warn("查询市场最新版本失败，使用" + (!string.IsNullOrEmpty(localVer) ? "已装版本 " + target.Substring(0, 8) : "内置兜底版本 " + target.Substring(0, 8)));
+                        }
+                        m.ResolvedCommit = target;
+                        bool versionChanged = (target != localVer) || (localVer == null);
+                        EnsureMarketplaceSource(m, mpRoot, tarExe, versionChanged);
+                        okCount++;
+                    }
+                    catch (Exception mex) { Warn("插件市场来源 " + m.CachePrefix + " 获取失败: " + Trunc(mex.Message)); }
+                }
+                if (okCount == 0) throw new Exception("全部市场来源获取失败");
+                // 版本升级/首次安装后清理旧 commit 的市场目录与缓存 zip
+                foreach (MarketSpec m in Markets)
+                {
+                    if (string.IsNullOrEmpty(m.ResolvedCommit)) continue;
+                    string repoBase = m.Repo.Substring(m.Repo.IndexOf('/') + 1);
+                    string keepDir = Path.Combine(mpRoot, repoBase + "-" + m.ResolvedCommit);
+                    foreach (string d in Directory.GetDirectories(mpRoot, repoBase + "-*"))
+                        if (string.Compare(d, keepDir, StringComparison.OrdinalIgnoreCase) != 0) { try { Directory.Delete(d, true); Ok("已清理旧版本市场目录: " + Path.GetFileName(d)); } catch { } }
+                    string keepZip = Path.Combine(CacheDir, m.CachePrefix + "-" + m.ResolvedCommit.Substring(0, 8) + ".zip");
+                    foreach (string z in Directory.GetFiles(CacheDir, m.CachePrefix + "-*.zip"))
+                        if (string.Compare(z, keepZip, StringComparison.OrdinalIgnoreCase) != 0) { try { File.Delete(z); Ok("已清理旧版本缓存: " + Path.GetFileName(z)); } catch { } }
+                }
+                PluginMarketplaceOk = BuildMergedMarketplace(mpRoot, configPath, ref cfg);
+                return PluginMarketplaceOk;
+            }
+            catch (Exception ex)
+            {
+                Warn("插件市场安装失败（不影响其他功能）: " + Trunc(ex.Message));
+                return false;
+            }
+        }
+
+        // 查询仓库分支最新 commit（GitHub API：直连 + gh-proxy 回退），失败返回 null
+        private static string GetLatestCommit(string repo, string branch)
+        {
+            try
+            {
+                string json = GetGitHubApiString("repos/" + repo + "/commits/" + branch);
+                if (string.IsNullOrEmpty(json)) return null;
+                Dictionary<string, object> o = ParseJson(json);
+                string sha = JS(o, "sha");
+                return (!string.IsNullOrEmpty(sha) && sha.Length >= 40) ? sha : null;
+            }
+            catch { return null; }
+        }
+
+        // 本地版本记录：mp\<CachePrefix>.version（内容 = 完整 commit）
+        private static string MarketVersionPath(string mpRoot, string cachePrefix)
+        {
+            return Path.Combine(mpRoot, cachePrefix + ".version");
+        }
+        private static string ReadMarketVersion(string mpRoot, string cachePrefix)
+        {
+            try
+            {
+                string p = MarketVersionPath(mpRoot, cachePrefix);
+                if (!File.Exists(p)) return null;
+                string v = File.ReadAllText(p, Encoding.UTF8).Trim();
+                return (v.Length >= 40) ? v : null;
+            }
+            catch { return null; }
+        }
+        private static void WriteMarketVersion(string mpRoot, string cachePrefix, string commit)
+        {
+            try { File.WriteAllText(MarketVersionPath(mpRoot, cachePrefix), commit + "\r\n", new UTF8Encoding(false)); }
+            catch (Exception ex) { Warn("市场版本记录写入失败: " + Trunc(ex.Message)); }
+        }
+
+        // 单个来源市场：版本未变 → 全跳过；版本变化/首次 → 下载（原子写入 + zip 完整性校验）→ tar 解压 → 记录版本
+        private static void EnsureMarketplaceSource(MarketSpec m, string mpRoot, string tarExe, bool versionChanged)
+        {
+            string repoBase = m.Repo.Substring(m.Repo.IndexOf('/') + 1);
+            // GitHub commit 归档根目录 = <仓库名>-<完整commit>
+            string marketDir = Path.Combine(mpRoot, repoBase + "-" + m.ResolvedCommit);
+            string mj = Path.Combine(marketDir, ".agents", "plugins", "marketplace.json");
+            if (!versionChanged && File.Exists(mj))
+            {
+                Ok("市场版本未变化（" + m.CachePrefix + " " + m.ResolvedCommit.Substring(0, 8) + "），跳过下载与解压");
+                return;
+            }
+            string zipPath = Path.Combine(CacheDir, m.CachePrefix + "-" + m.ResolvedCommit.Substring(0, 8) + ".zip");
+            // 旧目标版本的缓存 zip 不复用（内容对应旧 commit）
+            if (File.Exists(zipPath) && !IsValidZip(zipPath))
+            {
+                Warn("市场归档缓存损坏，删除重下: " + Path.GetFileName(zipPath));
+                try { File.Delete(zipPath); } catch { }
+            }
+            if (!File.Exists(zipPath))
+            {
+                bool dl = false;
+                foreach (string prefix in ZhCnSources())
+                {
+                    string url = prefix + "/" + m.Repo + "/archive/" + m.ResolvedCommit + ".zip";
+                    Step("尝试下载源: " + prefix);
+                    if (DownloadFile(url, zipPath, "插件市场来源 " + m.CachePrefix + "（" + m.SizeDesc + "）", m.MinSize) && IsValidZip(zipPath)) { dl = true; break; }
+                }
+                if (!dl) throw new Exception("所有下载源均失败");
+            }
+            if (!File.Exists(mj))
+            {
+                // 残留的旧解压目录先清掉再解压
+                if (Directory.Exists(marketDir)) { try { Directory.Delete(marketDir, true); } catch { } }
+                // 用系统内置 tar.exe 解压：仓库含超长嵌套路径，.NET ZipFile/路径 API 会失败，tar 原生支持长路径
                 ProcessStartInfo tpi = new ProcessStartInfo(tarExe, "-xf \"" + zipPath + "\" -C \"" + mpRoot + "\"");
                 tpi.UseShellExecute = false;
                 tpi.CreateNoWindow = true;
@@ -1896,42 +2126,150 @@ namespace CodexAppInstaller
                     if (terr.Trim().Length > 0) Console.WriteLine(terr.TrimEnd());
                     if (tp.ExitCode != 0) Warn("tar 有跳过条目（退出码 " + tp.ExitCode + "），以 marketplace.json 是否生成判定成败");
                 }
-                // 清理旧市场目录（kael-odin 中文版 / awesome 国际版）
-                foreach (string oldDir in new string[] { Path.Combine(mpRoot, "codex-plugins-zh-main"), Path.Combine(mpRoot, "awesome-codex-plugins-main") })
-                    if (Directory.Exists(oldDir)) { try { Directory.Delete(oldDir, true); } catch { } }
-                string marketDir = Path.Combine(mpRoot, "baomiao-codex-skills-marketplace-" + PluginMarketplaceCommit);
-                string mj = Path.Combine(marketDir, ".agents", "plugins", "marketplace.json");
-                if (!File.Exists(mj)) throw new Exception("解压后未找到 marketplace.json");
+                // 官方中文版仓库带约 35MB 网页资源（site/），Codex 用不到，解压后删除省磁盘
+                string siteDir = Path.Combine(marketDir, "site");
+                if (Directory.Exists(siteDir)) { try { Directory.Delete(siteDir, true); } catch { } }
+                if (!File.Exists(mj)) { try { File.Delete(zipPath); } catch { } throw new Exception("解压后未找到 marketplace.json"); }
+            }
+            WriteMarketVersion(mpRoot, m.CachePrefix, m.ResolvedCommit);
+            Ok("市场来源就绪: " + m.CachePrefix + " @ " + m.ResolvedCommit.Substring(0, 8) + (versionChanged ? "（已更新）" : "（已恢复）"));
+        }
+
+        // zip 完整性校验：残缺文件（下载中断）没有中央目录，OpenRead 会失败
+        private static bool IsValidZip(string path)
+        {
+            try { using (ZipArchive za = ZipFile.OpenRead(path)) return za.Entries.Count > 0; }
+            catch { return false; }
+        }
+
+        // 合成统一市场「Codex 插件」：官方中文版全量插件 + 暴喵精选插件（BaoMiaoPickedPlugins）
+        // 版本未变化且清单/注册均已是目标状态 → 全跳过（不写任何文件）
+        private static bool BuildMergedMarketplace(string mpRoot, string configPath, ref string cfg)
+        {
+            try
+            {
+                MarketSpec baseM = Markets[0], extraM = Markets[1];
+                string baseDir = Path.Combine(mpRoot, baseM.Repo.Substring(baseM.Repo.IndexOf('/') + 1) + "-" + baseM.ResolvedCommit);
+                string extraDir = Path.Combine(mpRoot, extraM.Repo.Substring(extraM.Repo.IndexOf('/') + 1) + "-" + extraM.ResolvedCommit);
+                string mj = Path.Combine(baseDir, ".agents", "plugins", "marketplace.json");
+                string extraMj = Path.Combine(extraDir, ".agents", "plugins", "marketplace.json");
+                if (!File.Exists(mj) || !File.Exists(extraMj)) throw new Exception("来源市场清单缺失");
                 Dictionary<string, object> mktRoot = ParseJson(File.ReadAllText(mj, Encoding.UTF8));
-                string marketId = JS(mktRoot, "name");
-                if (string.IsNullOrEmpty(marketId)) marketId = "baomiao-codex";
-                string marketDisplay = "暴喵 Codex 插件市场";
-                Dictionary<string, object> mktIfc = JD(mktRoot, "interface") as Dictionary<string, object>;
-                if (mktIfc != null && JS(mktIfc, "displayName").Length > 0) marketDisplay = JS(mktIfc, "displayName");
-                int pluginCount = AsDictList(JD(mktRoot, "plugins")).Count;
-                string marker = "[marketplaces." + marketId + "]";
-                if (cfg.Contains(marker))
+                // 快路径：清单已是合并态（名称/显示名/精选插件齐备）且注册指向当前目录 → 不写任何文件
+                bool manifestMerged = (JS(mktRoot, "name") == MergedMarketId)
+                    && (JS(JD(mktRoot, "interface") as Dictionary<string, object>, "displayName") == MergedMarketDisplay);
+                if (manifestMerged)
                 {
-                    Ok("插件市场已注册（" + marketDisplay + "，" + pluginCount + " 个插件）");
-                    PluginMarketplaceOk = true;
+                    List<Dictionary<string, object>> cur = AsDictList(JD(mktRoot, "plugins"));
+                    foreach (string pick in BaoMiaoPickedPlugins)
+                        if (cur.Find(delegate(Dictionary<string, object> e) { return JS(e, "name") == pick; }) == null) { manifestMerged = false; break; }
+                }
+                string marker = "[marketplaces." + MergedMarketId + "]";
+                bool regCurrent = cfg.Contains(marker) && cfg.Contains("source = '" + baseDir + "'");
+                if (manifestMerged && regCurrent)
+                {
+                    Ok("插件市场已是最新且未变化（" + MergedMarketDisplay + "，跳过合并与注册）");
                     return true;
                 }
+                Dictionary<string, object> extraRoot = ParseJson(File.ReadAllText(extraMj, Encoding.UTF8));
+                List<Dictionary<string, object>> extraAll = AsDictList(JD(extraRoot, "plugins"));
+                // 基础市场插件清单（JSON 数组 → ArrayList，兼容其他数组类型）
+                ArrayList pluginList = JD(mktRoot, "plugins") as ArrayList;
+                if (pluginList == null)
+                {
+                    pluginList = new ArrayList();
+                    foreach (object o in (System.Collections.IEnumerable)JD(mktRoot, "plugins")) pluginList.Add(o);
+                    mktRoot["plugins"] = pluginList;
+                }
+                int added = 0;
+                foreach (string pick in BaoMiaoPickedPlugins)
+                {
+                    Dictionary<string, object> entry = null;
+                    foreach (Dictionary<string, object> e in extraAll)
+                        if (JS(e, "name") == pick) { entry = e; break; }
+                    if (entry == null) { Warn("暴喵市场未找到精选插件 " + pick + "，跳过"); continue; }
+                    int existingIdx = -1;
+                    for (int idx = 0; idx < pluginList.Count; idx++)
+                    {
+                        Dictionary<string, object> e = pluginList[idx] as Dictionary<string, object>;
+                        if (e != null && JS(e, "name") == pick) { existingIdx = idx; break; }
+                    }
+                    // 复制插件目录（相对路径 ./plugins/<name> 在合并市场中保持不变）+ 补 ASCII 关键词
+                    string srcDir = Path.Combine(extraDir, "plugins", pick);
+                    string dstDir = Path.Combine(baseDir, "plugins", pick);
+                    if (!Directory.Exists(dstDir) && Directory.Exists(srcDir)) CopyDir(srcDir, dstDir);
+                    PatchPickedPluginJson(dstDir);
+                    if (existingIdx >= 0)
+                    {
+                        // 已在清单中：移到最前（应用列表按 manifest 顺序渲染）
+                        Dictionary<string, object> e = pluginList[existingIdx] as Dictionary<string, object>;
+                        pluginList.RemoveAt(existingIdx);
+                        pluginList.Insert(0, e);
+                    }
+                    else
+                    {
+                        // 插入到清单最前：应用列表按 manifest 顺序渲染，精选插件免搜索直接可见
+                        pluginList.Insert(0, entry);
+                        added++;
+                    }
+                }
+                // 市场名：Codex 插件
+                mktRoot["name"] = MergedMarketId;
+                Dictionary<string, object> ifc = JD(mktRoot, "interface") as Dictionary<string, object>;
+                if (ifc == null) { ifc = new Dictionary<string, object>(); mktRoot["interface"] = ifc; }
+                ifc["displayName"] = MergedMarketDisplay;
+                File.WriteAllText(mj, new JavaScriptSerializer().Serialize(mktRoot), new UTF8Encoding(false));
+                // 注册/刷新（单市场；commit 更新后 source 路径自动修正）——闭合引号一并移除
+                cfg = Regex.Replace(cfg, "\r?\n?\\[marketplaces\\." + Regex.Escape(MergedMarketId) + "\\]\r?\n?source_type = \"local\"\r?\n?source = '[^'\r\n]*'", "");
                 StringBuilder sb = new StringBuilder();
                 if (cfg.Length > 0 && !cfg.EndsWith("\n")) sb.AppendLine();
                 sb.AppendLine(marker);
                 sb.AppendLine("source_type = \"local\"");
-                sb.AppendLine("source = '" + marketDir + "'");
+                sb.AppendLine("source = '" + baseDir + "'");
                 File.WriteAllText(configPath, cfg + "\r\n" + sb.ToString(), new UTF8Encoding(false));
-
-                Ok("插件市场已注册: " + marketDisplay + "（" + pluginCount + " 个插件，安装零外网依赖）");
-                PluginMarketplaceOk = true;
+                cfg = File.ReadAllText(configPath, Encoding.UTF8);
+                Ok("已注册: " + MergedMarketDisplay + "（" + pluginList.Count + " 个插件，国内直连" + (added > 0 ? "，并入暴喵精选 " + added + " 个" : "") + (manifestMerged ? "，清单未变化" : "") + "）");
                 return true;
             }
             catch (Exception ex)
             {
-                Warn("插件市场安装失败（不影响其他功能）: " + Trunc(ex.Message));
+                Warn("合并市场构建失败: " + Trunc(ex.Message));
                 return false;
             }
+        }
+
+        // 递归复制目录
+        private static void CopyDir(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (string f in Directory.GetFiles(src))
+                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), true);
+            foreach (string d in Directory.GetDirectories(src))
+                CopyDir(d, Path.Combine(dst, Path.GetFileName(d)));
+        }
+
+        // 给并入的精选插件补充 ASCII 检索关键词（.codex-plugin/plugin.json 的 keywords 数组）
+        private static void PatchPickedPluginJson(string pluginDir)
+        {
+            try
+            {
+                string pj = Path.Combine(pluginDir, ".codex-plugin", "plugin.json");
+                if (!File.Exists(pj)) return;
+                Dictionary<string, object> root = ParseJson(File.ReadAllText(pj, Encoding.UTF8));
+                ArrayList kw = JD(root, "keywords") as ArrayList;
+                if (kw == null)
+                {
+                    kw = new ArrayList();
+                    object o = root.ContainsKey("keywords") ? root["keywords"] : null;
+                    if (o is System.Collections.IEnumerable && !(o is string))
+                        foreach (object x in (System.Collections.IEnumerable)o) kw.Add(x);
+                    root["keywords"] = kw;
+                }
+                foreach (string k in PickedExtraKeywords)
+                    if (!kw.Contains(k)) kw.Add(k);
+                File.WriteAllText(pj, new JavaScriptSerializer().Serialize(root), new UTF8Encoding(false));
+            }
+            catch (Exception ex) { Warn("精选插件元数据补充失败（不影响安装）: " + Trunc(ex.Message)); }
         }
 
         private static string CodexHomePath(string fileName)
