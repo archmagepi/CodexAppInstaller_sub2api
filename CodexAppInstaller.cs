@@ -217,6 +217,18 @@ namespace CodexAppInstaller
 
                 // 步骤 2/11：检查更新 → 下载并安装 Codex Desktop（已装且最新则跳过 1GB 下载）
                 AppxInfo installedNow = GetCodexAppx();
+                if (installedNow == null)
+                {
+                    // 手动卸载后机器级暂存包（provisioned）通常仍在：提权时直接从暂存补注册当前
+                    // 用户，避免 1GB 重复下载；补注册失败则走正常下载安装。
+                    AppxInfo staged = GetStagedCodex();
+                    if (staged != null && RegisterStagedUser(staged))
+                    {
+                        installedNow = GetCodexAppx();
+                        if (installedNow != null)
+                            Ok("检测到机器级暂存包，已补注册当前用户（版本 " + installedNow.Version + "），无需重新下载");
+                    }
+                }
                 string installedVer = installedNow != null ? installedNow.Version : null;
                 string msix = GetMsix(arch, installedVer);
                 AppxInfo appx;
@@ -1225,6 +1237,60 @@ namespace CodexAppInstaller
             return null;
         }
 
+        // 机器级暂存（staged/provisioned）包查询：用户级卸载后包文件通常仍在 WindowsApps，
+        // 可免下载直接补注册。Get-AppxPackage -AllUsers 需要管理员——非提权运行时失败返回
+        // null（走正常下载安装路径），提权安装器内可用。
+        private static AppxInfo GetStagedCodex()
+        {
+            try
+            {
+                using (PowerShell ps = PowerShell.Create())
+                {
+                    ps.AddScript("Get-AppxPackage -Name '*Codex*' -AllUsers");
+                    foreach (PSObject r in ps.Invoke())
+                    {
+                        string name = GetProp(r, "Name");
+                        if (string.IsNullOrEmpty(name) || name.IndexOf("ClaudeCode", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                        if (name.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        AppxInfo i = new AppxInfo
+                        {
+                            Name = name,
+                            Version = GetProp(r, "Version"),
+                            PackageFamilyName = GetProp(r, "PackageFamilyName"),
+                            InstallLocation = GetProp(r, "InstallLocation"),
+                            PackageFullName = GetProp(r, "PackageFullName")
+                        };
+                        if (!string.IsNullOrEmpty(i.PackageFullName) && !string.IsNullOrEmpty(i.InstallLocation)) return i;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // 从暂存包的 AppxManifest 补注册当前用户（免下载；等价设置页卸载后的快速恢复）
+        private static bool RegisterStagedUser(AppxInfo staged)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(staged.InstallLocation)) return false;
+                string manifest = Path.Combine(staged.InstallLocation, "AppxManifest.xml");
+                if (!File.Exists(manifest)) return false;
+                using (PowerShell ps = PowerShell.Create())
+                {
+                    ps.AddScript("Add-AppxPackage -Register '" + manifest.Replace("'", "''") + "' -DisableDevelopmentMode");
+                    ps.Invoke();
+                    if (ps.Streams.Error.Count > 0)
+                    {
+                        Warn("从暂存补注册当前用户失败: " + Trunc(CollectErrors(ps)));
+                        return false;
+                    }
+                }
+                return GetCodexAppx() != null;
+            }
+            catch (Exception ex) { Warn("从暂存补注册异常: " + Trunc(ex.Message)); return false; }
+        }
+
         private static string GetProp(PSObject obj, string name)
         {
             PSPropertyInfo pr = obj.Properties[name];
@@ -1378,15 +1444,22 @@ namespace CodexAppInstaller
             {
                 string aumid = GetAumid(appx);
                 string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                string lnk = Path.Combine(desktop, "Codex.lnk");
-                string script =
-                    "$ws = New-Object -ComObject WScript.Shell;" +
-                    "$sc = $ws.CreateShortcut('" + lnk.Replace("'", "''") + "');" +
-                    "$sc.TargetPath = 'shell:AppsFolder\\" + aumid + "';" +
-                    "$sc.Description = 'OpenAI Codex';" +
-                    "$sc.Save()";
-                InvokePsScript(script);
-                Ok("已创建桌面快捷方式: " + lnk);
+                // 桌面 + 开始菜单各创建一份（与汉化版快捷方式行为一致）
+                foreach (string lnkPath in new string[]
+                {
+                    Path.Combine(desktop, "Codex.lnk"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Codex.lnk")
+                })
+                {
+                    string script =
+                        "$ws = New-Object -ComObject WScript.Shell;" +
+                        "$sc = $ws.CreateShortcut('" + lnkPath.Replace("'", "''") + "');" +
+                        "$sc.TargetPath = 'shell:AppsFolder\\" + aumid + "';" +
+                        "$sc.Description = 'OpenAI Codex';" +
+                        "$sc.Save()";
+                    InvokePsScript(script);
+                }
+                Ok("已创建桌面/开始菜单快捷方式: " + Path.Combine(desktop, "Codex.lnk"));
             }
             catch (Exception ex) { Warn("创建桌面快捷方式失败: " + ex.Message); }
         }
@@ -1470,7 +1543,12 @@ namespace CodexAppInstaller
                     "$sc.Description = 'Xode AI Codex（中文版）';" +
                     "$sc.Save()";
                 InvokePsScript(script);
+                // 开始菜单快捷方式：与桌面快捷方式保持一致（同一包装脚本与图标）
+                string startMenuLnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Codex.lnk");
+                string smScript = script.Replace("CreateShortcut('" + lnk.Replace("'", "''") + "')", "CreateShortcut('" + startMenuLnk.Replace("'", "''") + "')");
+                InvokePsScript(smScript);
                 Ok("桌面快捷方式已指向汉化版: " + lnk);
+                Ok("开始菜单快捷方式已创建: " + startMenuLnk);
                 // 刷新图标缓存（桌面图标即时更新）
                 try
                 {
