@@ -41,7 +41,7 @@ namespace CodexAppInstaller
 {
     internal static class Program
     {
-        private static bool SkipChecksum, SkipShortcut, SkipApi, SkipZhCn, TestSub2api, NoElevate;
+        private static bool SkipChecksum, SkipShortcut, SkipApi, SkipZhCn, TestSub2api, NoElevate, ShowHelp;
         private static string ApiBaseUrl = "", ApiKey = "", ApiModel = "";
         private static string Site = "", Email = "", Password = "", LogFile = "", XodeLogoParam = "";
         private static string XodeLogoIcoPath = null;
@@ -102,16 +102,403 @@ namespace CodexAppInstaller
             }
         }
 
+        // ================= 右侧品牌信息面板（Xode AI 平台 / 中转站网址 / 客服二维码） =================
+        // 踩坑记录（改布局前必读）：
+        //  - 块字符 ▀ 必须 UTF-8 输出：Main 最前已设 OutputEncoding=UTF8（GBK 不含块字符，写出变 '?'）
+        //  - ANSI 真彩需在 stdout 句柄开 ENABLE_VIRTUAL_TERMINAL_PROCESSING(0x0004)，否则转义码原样打印
+        //  - 字体须切 Consolas 8x16：默认位图字体半块空心、QR 不可扫；6px 会 ClearType 彩条纹，8px 干净
+        //  - 象限字符（▘▝▖▗等）经字体回退渲染成空心轮廓，禁用；半块 ▀（1 字符列 2 模块行）是渲染上限
+        //  - 面板绘制只走 _raw（裸控制台），绝不能经 Console.Write（Console.Out 已是本类，会递归）
+        //  - 窗口缩放三步：缩窗 → 放 buffer → 开窗（buffer 直接缩到小于当前窗口宽会抛异常）
+        //  - QR 矩阵预生成（qrcode 库 v3-L，37x37 含 4 模块静区），源图 img/kefu-qr-src.jpg，
+        //    内容 https://work.weixin.qq.com/u/vc84875590e6bf20e2（已裁 ?v=&bb= 跟踪参数，302 行为一致）
+        private static TextWriter _consoleReal;  // 裸控制台输出（任何包装之前捕获，供面板绘制）
+        private static PanelUi _panel;
+
+        private static readonly string[] KefuQrMatrix = new string[]
+        {
+            "0000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000",
+            "0000111111100100001001110011111110000",
+            "0000100000101101101111001010000010000",
+            "0000101110100111001110100010111010000",
+            "0000101110101101010111001010111010000",
+            "0000101110100010111000111010111010000",
+            "0000100000101010000111101010000010000",
+            "0000111111101010101010101011111110000",
+            "0000000000000000101010000000000000000",
+            "0000111110111110110111001101010100000",
+            "0000110100011100001001111110100010000",
+            "0000001011100101100101000011000000000",
+            "0000010110011111000100011110010100000",
+            "0000011101100101111011010000011000000",
+            "0000110110011110100001110011100010000",
+            "0000101100101000101100000000011000000",
+            "0000101111000001101110011010100100000",
+            "0000001001101000010111110001011000000",
+            "0000111000011011101001111111101010000",
+            "0000100100101010011101001001001000000",
+            "0000100100000110000100000001000100000",
+            "0000101001110010111011011111101110000",
+            "0000000000001001000000001000111110000",
+            "0000111111101010110110011010111000000",
+            "0000100000100100100000011000100010000",
+            "0000101110101100011101101111101010000",
+            "0000101110101011100011100000011110000",
+            "0000101110101110111101001111111100000",
+            "0000100000101011100010011111010100000",
+            "0000111111101110010111010001111000000",
+            "0000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000"
+        };
+
+        // 面板 Writer：Console.Out 换成本类。左侧内容按列宽换行（不越面板），每次换行后重画面板
+        // （buffer 高==窗口高，内容到底滚动会带动面板行，需整面重绘覆盖）。
+        private sealed class PanelUi : TextWriter
+        {
+            private readonly object _sync = new object();
+            private readonly TextWriter _log;   // 左侧内容出口（Tee 或裸控制台；进日志）
+            private readonly TextWriter _raw;   // 裸控制台（面板绘制专用，不进日志）
+            private const int PanelW = 52;      // 面板总宽（含边框）
+            private const int QrModules = 37;   // QR 边长（含 4 模块静区；半块渲染 1 字符列 = 1 模块列）
+            private const int QrCellRows = 19;  // 半块渲染：37 模块 → 19 字符行高
+            private const int ContentH = 26;    // 面板内容总行数（品牌+间距+标签+网址+间距+文案+QR19+尾距）
+            private int _col;
+            private readonly StringBuilder _chunk = new StringBuilder();
+            private int _lastViewTop = -1, _lastW = -1, _lastH = -1;   // 重绘节流：视口行/尺寸缓存
+
+            private static string At(int row, int col) { return "\x1b[" + (row + 1) + ";" + (col + 1) + "H"; }
+
+            public PanelUi(TextWriter log, TextWriter raw) { _log = log; _raw = raw; }
+            public override Encoding Encoding { get { return _log.Encoding; } }
+
+            private static void Diag(string s) { try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "panel_diag.log"), s + "\r\n"); } catch { } }
+
+            public static PanelUi TryCreate(TextWriter raw)
+            {
+                try
+                {
+                    if (Console.IsOutputRedirected || GetConsoleWindow() == IntPtr.Zero) return null;
+                    PanelUi p = new PanelUi(Console.Out, raw);
+                    if (!p.Setup()) { Diag("fail: setup"); return null; }
+                    Console.SetOut(p);
+                    p.Draw(true);
+                    return p;
+                }
+                catch (Exception ex) { Diag("fail: ex " + ex.GetType().Name + " " + ex.Message); return null; }
+            }
+
+            private bool Setup()
+            {
+                IntPtr h = GetStdHandle(StdOutputHandle);
+                uint mode = 0;
+                if (GetConsoleMode(h, out mode)) SetConsoleMode(h, mode | 0x0004);   // ANSI VT
+                try
+                {
+                    CONSOLE_FONT_INFO_EX f = new CONSOLE_FONT_INFO_EX();
+                    f.cbSize = Marshal.SizeOf(typeof(CONSOLE_FONT_INFO_EX));
+                    f.dwFontSize = new COORD(8, 16);
+                    f.FontFamily = 54;
+                    f.FontWeight = 400;
+                    f.FaceName = "Consolas";
+                    SetCurrentConsoleFontEx(h, false, ref f);
+                }
+                catch { }
+                ResizeWindow(h, 124, 44);
+                int w, hh;
+                GetSize(out w, out hh);
+                return w >= 92 && hh >= 28;   // 内容最小 26 行 + 上下边框；宽度需容纳面板 52 列 + 左区可读
+            }
+
+            private static void ResizeWindow(IntPtr h, int w, int hh)
+            {
+                try
+                {
+                    CONSOLE_SCREEN_BUFFER_INFO info;
+                    if (!GetConsoleScreenBufferInfo(h, out info)) { Diag("resize: no info"); return; }
+                    // 注意勿按 dwMaximumWindowSize 收敛：WT 会把它报成当前 buffer 宽度，扩宽永远失败；
+                    // 直接以目标尺寸调用，失败（屏幕过小等）则保持原几何，Draw 按实际视口自适应
+                    SMALL_RECT r = new SMALL_RECT();
+                    r.L = 0; r.T = 0;
+                    r.R = (short)Math.Max(10, Math.Min(w, info.srWindow.R - info.srWindow.L + 1) - 1);
+                    r.B = (short)Math.Max(5, Math.Min(hh, info.srWindow.B - info.srWindow.T + 1) - 1);
+                    // WT 下 SetConsoleWindowInfo 会失败（视口由终端接管）——失败不放弃，仍尝试 buffer 扩容
+                    SetConsoleWindowInfo(h, true, ref r);
+                    SetConsoleScreenBufferSize(h, new COORD((short)w, (short)hh));
+                    SMALL_RECT full = new SMALL_RECT();
+                    full.L = 0; full.T = 0; full.R = (short)(w - 1); full.B = (short)(hh - 1);
+                    SetConsoleWindowInfo(h, true, ref full);
+                }
+                catch { }
+            }
+
+            private static void GetSize(out int w, out int h)
+            {
+                try { w = Console.WindowWidth; h = Console.WindowHeight; }
+                catch { w = 124; h = 44; }
+            }
+
+            private int PanelLeft(int width) { int bw = Math.Min(PanelW, width - 1); return width - bw; }
+            private int LeftWidth() { int w, h; GetSize(out w, out h); return Math.Max(24, PanelLeft(w) - 2); }
+
+            private static int CharWidth(char c)
+            {
+                if ((c >= 0x1100 && c <= 0x115F) || (c >= 0x2E80 && c <= 0x303E) || (c >= 0x3041 && c <= 0x33FF)
+                    || (c >= 0x3400 && c <= 0x4DBF) || (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xA000 && c <= 0xA4CF)
+                    || (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFE30 && c <= 0xFE4F)
+                    || (c >= 0xFF00 && c <= 0xFF60) || (c >= 0xFFE0 && c <= 0xFFE6))
+                    return 2;   // 超 BMP 立体字以 surrogate 对出现：两字符各计 1 列，合计 2 列，正确
+                return 1;
+            }
+
+            // ---- 左侧内容出口（TextWriter 重载） ----
+            // 每次 Write 调用结束必须 FlushChunk：无换行提示（“请输入账号: ”）、密码回显 *、
+            // \r 下载进度条都依赖立即上屏；这也还原了原版 TeeWriter 一次调用一次日志追加的粒度
+            public override void Write(char value) { lock (_sync) { SyncCol(); Emit(value); FlushChunk(); } }
+            public override void Write(string value)
+            {
+                if (value == null) return;
+                lock (_sync) { SyncCol(); for (int i = 0; i < value.Length; i++) Emit(value[i]); FlushChunk(); }
+            }
+            public override void WriteLine(string value)
+            {
+                lock (_sync)
+                {
+                    SyncCol();
+                    if (value != null) for (int i = 0; i < value.Length; i++) Emit(value[i]);
+                    EmitNewline();
+                }
+            }
+            public override void WriteLine() { lock (_sync) { SyncCol(); EmitNewline(); } }
+
+            private void SyncCol()
+            {
+                try
+                {
+                    int lw = LeftWidth();
+                    int c = Console.CursorLeft;
+                    if (c >= lw)
+                    {
+                        // 真实光标漂进面板区（如超长输入回显）：先真实换行归零再写
+                        WriteLineBreak();
+                    }
+                    else _col = c;
+                }
+                catch { }
+            }
+
+            private void Emit(char c)
+            {
+                if (c == '\n') { WriteLineBreak(); return; }
+                if (c == '\r') { FlushChunk(); _log.Write("\r"); _col = 0; return; }
+                if (c == '\b') { FlushChunk(); _log.Write("\b"); if (_col > 0) _col--; return; }
+                if (c < 32) c = '?';
+                int w = CharWidth(c);
+                if (_col + w > LeftWidth()) WriteLineBreak();
+                _chunk.Append(c);
+                _col += w;
+            }
+
+            private void EmitNewline() { WriteLineBreak(); }
+
+            private void FlushChunk()
+            {
+                if (_chunk.Length == 0) return;
+                _log.Write(_chunk.ToString());
+                _chunk.Length = 0;
+            }
+
+            // 换行 + 滚动感知重绘：buffer==window 时滚动是缓冲整体上移、srWindow.T 恒 0，
+            // 只能靠「光标在视口底行 + 换行」判定发生了滚动（此时必须强制重绘面板）
+            private void WriteLineBreak()
+            {
+                bool bottom = CursorAtBottom();
+                FlushChunk();
+                _log.Write("\n");
+                _col = 0;
+                Draw(bottom);
+            }
+
+            private bool CursorAtBottom()
+            {
+                try
+                {
+                    IntPtr h = GetStdHandle(StdOutputHandle);
+                    CONSOLE_SCREEN_BUFFER_INFO info;
+                    if (!GetConsoleScreenBufferInfo(h, out info)) return false;
+                    int hgt = info.srWindow.B - info.srWindow.T + 1;
+                    return info.dwCursorPosition.Y >= info.srWindow.T + hgt - 1;
+                }
+                catch { return false; }
+            }
+
+            // ---- 面板绘制 ----
+            // 结构层（边框/空白/QR）用 WriteConsoleOutputW 直写缓冲单元格：无 ANSI 字节量、不经过
+            // VT 解析器（滚动后每行重画也不会丢字节/阻塞）、不动光标。品牌/网址/文案 4 行含 CJK
+            // 仍走 VT 短码（规避 CHAR_INFO 宽字符 lead/trail 配对坑），单次 ~400B。颜色为 16 色：
+            // conhost 下 DarkCyan = 品牌青 RGB(0,128,128)；WT 主题下青系略偏蓝。
+
+            public void Draw() { Draw(false); }
+
+            public void Draw(bool force)
+            {
+                lock (_sync)
+                {
+                    try
+                    {
+                        IntPtr h = GetStdHandle(StdOutputHandle);
+                        CONSOLE_SCREEN_BUFFER_INFO info;
+                        if (!GetConsoleScreenBufferInfo(h, out info)) return;
+                        int W = info.srWindow.R - info.srWindow.L + 1;
+                        int H = info.srWindow.B - info.srWindow.T + 1;
+                        int viewTop = info.srWindow.T;
+                        if (!force && viewTop == _lastViewTop && W == _lastW && H == _lastH) return;
+                        _lastViewTop = viewTop; _lastW = W; _lastH = H;
+                        int bw = Math.Min(PanelW, W - 1);
+                        int bx = W - bw;
+                        int innerW = bw - 2;
+                        int lw = bx - 2;
+                        int saveC = info.dwCursorPosition.X, saveR = info.dwCursorPosition.Y;
+                        if (saveC >= lw) saveC = Math.Max(0, lw - 1);
+                        if (saveC < 0) saveC = 0;
+                        if (saveR < viewTop) saveR = viewTop; else if (saveR >= viewTop + H) saveR = viewTop + H - 1;
+
+                        // 结构层：黑底清残留 + 青色细边框 + QR 半块
+                        CHAR_INFO[] cells = new CHAR_INFO[bw * H];
+                        for (int i = 0; i < cells.Length; i++) { cells[i].UnicodeChar = ' '; cells[i].Attributes = AttrBlackBg; }
+                        for (int x2 = 0; x2 < bw; x2++)
+                        {
+                            SetCell(cells, bw, 0, x2, x2 == 0 ? '┌' : (x2 == bw - 1 ? '┐' : '─'), AttrTeal);
+                            SetCell(cells, bw, H - 1, x2, x2 == 0 ? '└' : (x2 == bw - 1 ? '┘' : '─'), AttrTeal);
+                        }
+                        for (int y = 1; y < H - 1; y++)
+                        {
+                            SetCell(cells, bw, y, 0, '│', AttrTeal);
+                            SetCell(cells, bw, y, bw - 1, '│', AttrTeal);
+                        }
+                        // 内容（垂直居中）：QR（37 模块，半块 1 字符列 = 1 模块列）
+                        int innerH = H - 2;
+                        int top = 1 + (innerH - ContentH) / 2;
+                        if (top < 1) top = 1;
+                        int qrX = 1 + (innerW - QrModules) / 2;
+                        int qrY = top + 6;
+                        for (int pr = 0; pr < QrCellRows && qrY + pr < H - 1; pr++)
+                        {
+                            int mTop = pr * 2, mBot = mTop + 1;
+                            for (int c2 = 0; c2 < QrModules; c2++)
+                            {
+                                bool dTop = KefuQrMatrix[mTop][c2] == '1';
+                                bool dBot = mBot < QrModules && KefuQrMatrix[mBot][c2] == '1';
+                                ushort attr = (ushort)((dTop ? AttrBlackFg : AttrWhiteFg) | (dBot ? AttrBlackBg : AttrWhiteBg));
+                                SetCell(cells, bw, qrY + pr, qrX + c2, dTop == dBot ? ' ' : '▀', attr);
+                            }
+                        }
+                        COORD bufSize = new COORD((short)bw, (short)H);
+                        COORD bufCoord = new COORD(0, 0);
+                        SMALL_RECT dest = new SMALL_RECT();
+                        dest.L = (short)bx; dest.T = (short)viewTop;
+                        dest.R = (short)(bx + bw - 1); dest.B = (short)(viewTop + H - 1);
+                        WriteConsoleOutputW(h, cells, bufSize, bufCoord, ref dest);
+
+                        // 文字层（含 CJK，覆盖在结构层之上）：1 Xode AI 平台 / 2 中转站网址 / 3 客服二维码
+                        _raw.Write(At(viewTop + top, bx + 1 + (innerW - 12) / 2)
+                          + "\x1b[97mXode\x1b[36m AI \x1b[90m平台\x1b[0m");
+                        _raw.Write(At(viewTop + top + 2, bx + 1 + (innerW - 10) / 2) + "\x1b[90m中转站网址\x1b[0m");
+                        _raw.Write(At(viewTop + top + 3, bx + 1 + (innerW - 23) / 2) + "\x1b[96mhttps://hub.xodeai.com\x1b[0m");
+                        _raw.Write(At(viewTop + top + 5, bx + 1 + (innerW - 16) / 2) + "\x1b[90m微信扫码联系客服\x1b[0m");
+                        _raw.Write(At(saveR, saveC));   // 光标还原到左区
+                    }
+                    catch { }
+                }
+            }
+
+            private static void SetCell(CHAR_INFO[] cells, int bw, int row, int col, char ch, ushort attr)
+            {
+                int i = row * bw + col;
+                if (i >= 0 && i < cells.Length) { cells[i].UnicodeChar = ch; cells[i].Attributes = attr; }
+            }
+
+            // ---- 本机 Win32 ----
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern IntPtr GetStdHandle(int nStdHandle);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetConsoleScreenBufferInfo(IntPtr hConsoleOutput, out CONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleScreenBufferSize(IntPtr hConsoleOutput, COORD dwSize);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleWindowInfo(IntPtr hConsoleOutput, bool bAbsolute, ref SMALL_RECT lpConsoleWindow);
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool SetCurrentConsoleFontEx(IntPtr hConsoleOutput, bool bMaximumWindow, ref CONSOLE_FONT_INFO_EX lpConsoleCurrentFontEx);
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool WriteConsoleOutputW(IntPtr hConsoleOutput, CHAR_INFO[] lpBuffer, COORD dwBufferSize, COORD dwBufferCoord, ref SMALL_RECT lpScreen);
+            [DllImport("kernel32.dll")]
+            private static extern IntPtr GetConsoleWindow();
+
+            private const int StdOutputHandle = -11;
+
+            // 16 色属性（CHAR_INFO.Attributes，位序为 B|G|R）：conhost 下 DarkCyan=RGB(0,128,128) 品牌青
+            private const ushort AttrBlackFg = 0x0000;
+            private const ushort AttrWhiteFg = 0x000F;   // 亮白（R|G|B|I）
+            private const ushort AttrBlackBg = 0x0000;
+            private const ushort AttrWhiteBg = 0x00F0;   // 白底（QR 静区/亮模块）
+            private const ushort AttrTeal = 0x0003;      // DarkCyan（G|B）边框
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct COORD
+            {
+                public short X; public short Y;
+                public COORD(short x, short y) { X = x; Y = y; }
+            }
+            [StructLayout(LayoutKind.Sequential)]
+            private struct SMALL_RECT { public short L; public short T; public short R; public short B; }
+            [StructLayout(LayoutKind.Sequential)]
+            private struct CONSOLE_SCREEN_BUFFER_INFO
+            {
+                public COORD dwSize;
+                public COORD dwCursorPosition;
+                public ushort wAttributes;
+                public SMALL_RECT srWindow;
+                public COORD dwMaximumWindowSize;
+            }
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+            private struct CONSOLE_FONT_INFO_EX
+            {
+                public int cbSize;
+                public uint nFont;
+                public COORD dwFontSize;
+                public int FontFamily;
+                public int FontWeight;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FaceName;
+            }
+            [StructLayout(LayoutKind.Explicit)]
+            private struct CHAR_INFO
+            {
+                [FieldOffset(0)] public ushort UnicodeChar;
+                [FieldOffset(2)] public ushort Attributes;
+            }
+        }
+
         [STAThread]
         private static int Main(string[] args)
         {
             try { Console.Title = "Xode AI — Codex App 一键安装程序"; } catch { }
+            // 块字符（▀）依赖 UTF-8 输出，必须最先设置（GBK 控制台会把块字符变 '?'）
+            try { Console.OutputEncoding = Encoding.UTF8; } catch { }
+            _consoleReal = Console.Out;   // 面板绘制用的裸控制台（在任何包装之前捕获）
             foreach (string a in args)
             {
                 string arg = a; string val = "";
                 int eq = a.IndexOf('=');
                 if (eq > 0) { arg = a.Substring(0, eq); val = a.Substring(eq + 1); }
-                if (arg == "-h" || arg == "-?" || arg == "--help") { PrintUsage(); Pause(); return 0; }
+                if (arg == "-h" || arg == "-?" || arg == "--help") { ShowHelp = true; }
                 if (arg == "-SkipChecksum") SkipChecksum = true;
                 else if (arg == "-SkipShortcut") SkipShortcut = true;
                 else if (arg == "-SkipApi") SkipApi = true;
@@ -140,6 +527,10 @@ namespace CodexAppInstaller
                 }
                 catch { }
             }
+
+            // 右侧品牌信息面板（Xode AI 平台 / 中转站网址 / 客服二维码）；初始化失败则退化为普通全宽输出
+            _panel = PanelUi.TryCreate(_consoleReal);
+            if (ShowHelp) { PrintUsage(); Pause(); return 0; }
 
             // 测试模式：仅验证 sub2api 登录/建 Key/写配置（无需管理员、不安装不汉化）
             if (TestSub2api) { int rc = RunSub2apiTest(); Pause(); return rc; }
@@ -194,6 +585,10 @@ namespace CodexAppInstaller
 
             try
             {
+                // 提权进入安装步骤前先关闭运行中的 Codex 桌面端：MSIX 覆盖安装、汉化补丁覆盖、
+                // 图标品牌化都会被运行中的应用占用文件；先优雅关闭（给保存状态留 3 秒）再强杀
+                CloseCodexApp();
+
                 string arch = GetArch();
                 Ok("系统架构: " + arch);
 
@@ -343,6 +738,40 @@ namespace CodexAppInstaller
             {
                 using (WindowsIdentity id = WindowsIdentity.GetCurrent())
                     return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+            }
+            catch { return false; }
+        }
+        // 关闭运行中的 Codex 桌面端 GUI。只杀 GUI：新架构进程名 ChatGPT.exe（26.1106+）；
+        // 旧架构 Codex.exe 仅限包内路径（%LOCALAPPDATA%\OpenAI\Codex\bin 下的 codex.exe 是
+        // CLI，用户可能在跑 CLI 会话，不能误杀）
+        private static void CloseCodexApp()
+        {
+            int killed = 0;
+            foreach (Process p in Process.GetProcessesByName("ChatGPT"))
+            {
+                try { if (GracefulKill(p)) killed++; } catch { }
+            }
+            foreach (Process p in Process.GetProcessesByName("Codex"))
+            {
+                try
+                {
+                    string path = "";
+                    try { path = p.MainModule.FileName ?? ""; } catch { }
+                    if (path.IndexOf("WindowsApps", StringComparison.OrdinalIgnoreCase) < 0
+                        && path.IndexOf("OpenAI.Codex", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (GracefulKill(p)) killed++;
+                }
+                catch { }
+            }
+            if (killed > 0) Ok("已关闭正在运行的 Codex 桌面端（" + killed + " 个进程）");
+        }
+        private static bool GracefulKill(Process p)
+        {
+            try { if (p.CloseMainWindow()) p.WaitForExit(3000); } catch { }
+            try
+            {
+                if (!p.HasExited) { p.Kill(); p.WaitForExit(3000); }
+                return p.HasExited;
             }
             catch { return false; }
         }

@@ -12,7 +12,7 @@ Windows 上绕过网络限制，一键安装并配置 Codex App——即 **ChatG
 4. 按 sub2api 官方模板写入 `~/.codex/config.toml`（合并式生成，保留已装插件与自定义配置）：联网搜索=live、**Full Access**、记忆=开、启动更新检查=关
 5. 汉化（双轨自适应）：新版 Codex → [汉化启动器](https://github.com/shibaweidu/codex-desktop-zh)（原生 i18n 注入）；旧版 → [codex-zh-CN](https://github.com/xqnode/codex-zh-CN) 补丁副本（含兼容补丁），均走国内线路
 6. 内置统一插件市场「Codex 插件」——192 个官方插件全量汉化（[kael-odin/codex-plugins-zh](https://github.com/kael-odin/codex-plugins-zh)）+ 暴喵精选「中文学术研究工具箱」（[baomiao-codex-skills-marketplace](https://github.com/tetexu1994-star/baomiao-codex-skills-marketplace)），国内直连安装，版本锁定
-7. Xode AI 品牌化：安装器图标/窗口标题、桌面图标、启动器图标
+7. Xode AI 品牌化：安装器图标/窗口标题、桌面图标、启动器图标；控制台右侧常驻信息面板（**Xode AI 平台 / 中转站网址 / 微信客服二维码**，手机扫码即联系客服，真彩 ANSI 渲染，窄屏/重定向自动退化）
 8. 桌面快捷方式直接指向汉化目标（启动器/补丁副本），无启动脚本
 9. 输出使用说明
 
@@ -36,6 +36,7 @@ CodexAppInstaller.exe -TestSub2api -Email you@example.com -Password yourpass
 
 ![运行效果](img/runpic.png)
 ![应用截图](img/codexapppic.png)
+![右侧信息面板（客服二维码）](img/panel.png)
 
 ## 文件
 
