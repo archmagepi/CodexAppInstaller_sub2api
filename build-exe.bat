@@ -28,7 +28,8 @@ if not exist "%SEVENZIP%" set "SEVENZIP=%ProgramFiles(x86)%\7-Zip\7z.exe"
 if not exist "%SEVENZIP%" for %%I in (7z.exe) do set "SEVENZIP=%%~$PATH:I"
 
 cd /d "%~dp0"
-"%CSC%" /nologo /target:exe /optimize /platform:x64 /win32icon:xode-logo.ico /out:CodexAppInstaller.exe /r:"%PSDLL%" /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll CodexAppInstaller.cs
+call gen_buildinfo.bat
+"%CSC%" /nologo /target:exe /optimize /platform:x64 /win32icon:xode-logo.ico /out:CodexAppInstaller.exe /r:"%PSDLL%" /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll CodexAppInstaller.cs BuildInfo.cs
 if errorlevel 1 (
     echo [ERROR] compile failed.
     exit /b 1
