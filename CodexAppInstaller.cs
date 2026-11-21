@@ -718,7 +718,7 @@ namespace CodexAppInstaller
         private static void Banner()
         {
             Console.WriteLine("===============================================");
-            Console.WriteLine(" Codex App（ChatGPT Desktop）一键安装程序（编译 " + BuildInfo.Time + "）");
+            Console.WriteLine(" Codex App（ChatGPT Desktop）一键安装程序（" + BuildInfo.Time + "版本）");
             Console.WriteLine("===============================================");
             Console.WriteLine(" 说明: 自动安装 Codex App、配置 AI中转站、启用汉化、内置中文插件市场");
         }
@@ -3154,7 +3154,7 @@ namespace CodexAppInstaller
 
         private static void PrintUsage()
         {
-            Console.WriteLine("Codex App（ChatGPT Desktop）一键安装程序（编译 " + BuildInfo.Time + "、纯 .NET 实现）");
+            Console.WriteLine("Codex App（ChatGPT Desktop）一键安装程序（" + BuildInfo.Time + "版本、纯 .NET 实现）");
             Console.WriteLine();
             Console.WriteLine("用法: CodexAppInstaller.exe [参数...]");
             Console.WriteLine();
