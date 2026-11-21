@@ -720,7 +720,7 @@ namespace CodexAppInstaller
             Console.WriteLine("===============================================");
             Console.WriteLine(" Codex App（ChatGPT Desktop）一键安装程序（国内网络优化版）");
             Console.WriteLine("===============================================");
-            Console.WriteLine(" 说明: 自动安装 Codex App、配置 AI中转站、启用汉化");
+            Console.WriteLine(" 说明: 自动安装 Codex App、配置 AI中转站、启用汉化、内置中文插件市场");
         }
         private static void Pause()
         {
