@@ -44,7 +44,7 @@ CodexAppInstaller.exe -TestSub2api -Email you@example.com -Password yourpass
 |---|---|
 | [CodexAppInstaller.exe](https://raw.githubusercontent.com/l1i1/CodexAppInstaller/main/CodexAppInstaller.exe) | 最终分发物（全 C# 自包含，双击即用，自动提权） |
 | `CodexAppInstaller.cs` | 完整源码（下载 / 校验 / 安装 / sub2api / 配置 / 汉化 / 快捷方式） |
-| `build-exe.bat` | 重新编译脚本（本机 .NET Framework csc + PowerShell SDK，无第三方依赖）；构建后自动用 7-Zip 打包 `CodexAppInstaller.zip`（密码 `xodeai`，ZipCrypto 格式，含解压自检；构建机需安装 7-Zip） |
+| `build-exe.bat` | 重新编译脚本（本机 .NET Framework csc + PowerShell SDK，无第三方依赖）；构建后自动用 7-Zip 打包 `CodexAppInstaller.zip`（含完整性自检；构建机需安装 7-Zip） |
 | `img/` | 截图 |
 | `README.md` | 本文档 |
 
