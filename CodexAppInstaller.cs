@@ -2634,13 +2634,17 @@ namespace CodexAppInstaller
             public long MinSize;
             public string BootstrapCommit;   // 查询 API 失败且本地无版本记录时的兜底版本
             public string ResolvedCommit;    // 运行时解析出的目标 commit
+            public string Kind;              // "market"=标准市场仓库（含 .agents/plugins/marketplace.json）；"plugin"=纯插件源仓库（按 skills/ 校验，并入时生成包装）
         }
         private static readonly MarketSpec[] Markets = new MarketSpec[] {
-            new MarketSpec { Repo = "kael-odin/codex-plugins-zh", Branch = "main", CachePrefix = "kzh", SizeDesc = "约 72 MB", MinSize = 50000000, BootstrapCommit = "e3091d1b371a9dcd9455d333175f948b286fdfcf" },
-            new MarketSpec { Repo = "tetexu1994-star/baomiao-codex-skills-marketplace", Branch = "main", CachePrefix = "baomiao", SizeDesc = "约 4.5 MB", MinSize = 2000000, BootstrapCommit = "cb69c4a7e42ddb85227e6f61cc9eb7bf9e1b7df5" }
+            new MarketSpec { Repo = "kael-odin/codex-plugins-zh", Branch = "main", CachePrefix = "kzh", SizeDesc = "约 72 MB", MinSize = 50000000, BootstrapCommit = "e3091d1b371a9dcd9455d333175f948b286fdfcf", Kind = "market" },
+            new MarketSpec { Repo = "tetexu1994-star/baomiao-codex-skills-marketplace", Branch = "main", CachePrefix = "baomiao", SizeDesc = "约 4.5 MB", MinSize = 2000000, BootstrapCommit = "cb69c4a7e42ddb85227e6f61cc9eb7bf9e1b7df5", Kind = "market" },
+            new MarketSpec { Repo = "dreammis/social-auto-upload", Branch = "main", CachePrefix = "sau", SizeDesc = "约 25 MB", MinSize = 20000000, BootstrapCommit = "3847fff01f5434a8a32829833163cd6723cabc59", Kind = "plugin" }
         };
         private const string MergedMarketId = "codex-plugins";
         private const string MergedMarketDisplay = "Codex 插件";
+        // 并入的社媒分发插件（dreammis/social-auto-upload）——统一市场清单位置 1（第二位）
+        private const string SauPluginName = "social-auto-upload";
         // 从暴喵市场并入的精选插件（name = 暴喵 marketplace.json 的插件 name 字段）
         private static readonly string[] BaoMiaoPickedPlugins = new string[] { "academic-research-toolkit" };
         // 精选插件补充的 ASCII 检索关键词：应用搜索规范化会丢弃全部非 [a-z0-9] 字符
@@ -2750,8 +2754,12 @@ namespace CodexAppInstaller
             string repoBase = m.Repo.Substring(m.Repo.IndexOf('/') + 1);
             // GitHub commit 归档根目录 = <仓库名>-<完整commit>
             string marketDir = Path.Combine(mpRoot, repoBase + "-" + m.ResolvedCommit);
-            string mj = Path.Combine(marketDir, ".agents", "plugins", "marketplace.json");
-            if (!versionChanged && File.Exists(mj))
+            // 就绪校验按来源类型：标准市场仓库验 marketplace.json；纯插件源仓库验 skills/ 目录
+            bool pluginKind = (m.Kind == "plugin");
+            string readyMark = pluginKind
+                ? Path.Combine(marketDir, "skills")
+                : Path.Combine(marketDir, ".agents", "plugins", "marketplace.json");
+            if (!versionChanged && File.Exists(readyMark))
             {
                 Ok("市场版本未变化（" + m.CachePrefix + " " + m.ResolvedCommit.Substring(0, 8) + "），跳过下载与解压");
                 return;
@@ -2774,7 +2782,7 @@ namespace CodexAppInstaller
                 }
                 if (!dl) throw new Exception("所有下载源均失败");
             }
-            if (!File.Exists(mj))
+            if (!File.Exists(readyMark))
             {
                 // 残留的旧解压目录先清掉再解压
                 if (Directory.Exists(marketDir)) { try { Directory.Delete(marketDir, true); } catch { } }
@@ -2796,7 +2804,7 @@ namespace CodexAppInstaller
                 // 官方中文版仓库带约 35MB 网页资源（site/），Codex 用不到，解压后删除省磁盘
                 string siteDir = Path.Combine(marketDir, "site");
                 if (Directory.Exists(siteDir)) { try { Directory.Delete(siteDir, true); } catch { } }
-                if (!File.Exists(mj)) { try { File.Delete(zipPath); } catch { } throw new Exception("解压后未找到 marketplace.json"); }
+                if (!File.Exists(readyMark)) { try { File.Delete(zipPath); } catch { } throw new Exception(pluginKind ? "解压后未找到 skills 目录" : "解压后未找到 marketplace.json"); }
             }
             WriteMarketVersion(mpRoot, m.CachePrefix, m.ResolvedCommit);
             Ok("市场来源就绪: " + m.CachePrefix + " @ " + m.ResolvedCommit.Substring(0, 8) + (versionChanged ? "（已更新）" : "（已恢复）"));
@@ -2815,14 +2823,16 @@ namespace CodexAppInstaller
         {
             try
             {
-                MarketSpec baseM = Markets[0], extraM = Markets[1];
+                MarketSpec baseM = Markets[0], extraM = Markets[1], sauM = Markets[2];
                 string baseDir = Path.Combine(mpRoot, baseM.Repo.Substring(baseM.Repo.IndexOf('/') + 1) + "-" + baseM.ResolvedCommit);
                 string extraDir = Path.Combine(mpRoot, extraM.Repo.Substring(extraM.Repo.IndexOf('/') + 1) + "-" + extraM.ResolvedCommit);
+                string sauDir = Path.Combine(mpRoot, sauM.Repo.Substring(sauM.Repo.IndexOf('/') + 1) + "-" + sauM.ResolvedCommit);
                 string mj = Path.Combine(baseDir, ".agents", "plugins", "marketplace.json");
                 string extraMj = Path.Combine(extraDir, ".agents", "plugins", "marketplace.json");
-                if (!File.Exists(mj) || !File.Exists(extraMj)) throw new Exception("来源市场清单缺失");
+                string sauSkills = Path.Combine(sauDir, "skills");
+                if (!File.Exists(mj) || !File.Exists(extraMj) || !Directory.Exists(sauSkills)) throw new Exception("来源市场清单缺失");
                 Dictionary<string, object> mktRoot = ParseJson(File.ReadAllText(mj, Encoding.UTF8));
-                // 快路径：清单已是合并态（名称/显示名/精选插件齐备）且注册指向当前目录 → 不写任何文件
+                // 快路径：清单已是合并态（名称/显示名/精选/社媒插件齐备且目录就绪）且注册指向当前目录 → 不写任何文件
                 bool manifestMerged = (JS(mktRoot, "name") == MergedMarketId)
                     && (JS(JD(mktRoot, "interface") as Dictionary<string, object>, "displayName") == MergedMarketDisplay);
                 if (manifestMerged)
@@ -2830,6 +2840,14 @@ namespace CodexAppInstaller
                     List<Dictionary<string, object>> cur = AsDictList(JD(mktRoot, "plugins"));
                     foreach (string pick in BaoMiaoPickedPlugins)
                         if (cur.Find(delegate(Dictionary<string, object> e) { return JS(e, "name") == pick; }) == null) { manifestMerged = false; break; }
+                    if (manifestMerged)
+                    {
+                        // 社媒插件：清单位置 1（第二位）+ 插件目录 skills 就绪 + 与当前 commit 一致
+                        string sauMarker = Path.Combine(baseDir, "plugins", SauPluginName, ".source-commit");
+                        if (cur.Count < 2 || JS(cur[1] as Dictionary<string, object>, "name") != SauPluginName
+                            || !File.Exists(sauMarker) || File.ReadAllText(sauMarker).Trim() != sauM.ResolvedCommit)
+                            manifestMerged = false;
+                    }
                 }
                 string marker = "[marketplaces." + MergedMarketId + "]";
                 bool regCurrent = cfg.Contains(marker) && cfg.Contains("source = '" + baseDir + "'");
@@ -2880,6 +2898,49 @@ namespace CodexAppInstaller
                         added++;
                     }
                 }
+                // 并入社媒分发插件（social-auto-upload，清单位置 1 = 第二位）：
+                // 仓库自带标准 skills/（18 个平台 skill，经 sau CLI 工作），包装生成 .codex-plugin/plugin.json
+                {
+                    string sauDst = Path.Combine(baseDir, "plugins", SauPluginName);
+                    string sauMarker = Path.Combine(sauDst, ".source-commit");
+                    string curCommit = (File.Exists(sauMarker) ? File.ReadAllText(sauMarker).Trim() : "");
+                    bool needsMaterialize = (curCommit != sauM.ResolvedCommit) || !Directory.Exists(Path.Combine(sauDst, "skills"));
+                    if (needsMaterialize)
+                    {
+                        if (Directory.Exists(sauDst)) { try { Directory.Delete(sauDst, true); } catch { } }
+                        CopyDir(sauSkills, Path.Combine(sauDst, "skills"));
+                        WriteSauPluginJson(sauDst, sauM.ResolvedCommit);
+                        File.WriteAllText(sauMarker, sauM.ResolvedCommit + "\r\n", new UTF8Encoding(false));
+                        added++;
+                    }
+                    // 清单条目：构造 → 已存在则移到位置 1，否则插入位置 1（应用列表按 manifest 顺序渲染）
+                    Dictionary<string, object> sauEntry = null;
+                    for (int idx = 0; idx < pluginList.Count; idx++)
+                    {
+                        Dictionary<string, object> e = pluginList[idx] as Dictionary<string, object>;
+                        if (e != null && JS(e, "name") == SauPluginName) { sauEntry = e; break; }
+                    }
+                    if (sauEntry == null)
+                    {
+                        sauEntry = new Dictionary<string, object>();
+                        sauEntry["name"] = SauPluginName;
+                        Dictionary<string, object> srcObj = new Dictionary<string, object>();
+                        srcObj["source"] = "local";
+                        srcObj["path"] = "./plugins/" + SauPluginName;
+                        sauEntry["source"] = srcObj;
+                        Dictionary<string, object> pol = new Dictionary<string, object>();
+                        pol["installation"] = "AVAILABLE";
+                        pol["authentication"] = "ON_INSTALL";
+                        sauEntry["policy"] = pol;
+                        sauEntry["category"] = "Productivity";
+                        pluginList.Insert(Math.Min(1, pluginList.Count), sauEntry);
+                    }
+                    else
+                    {
+                        pluginList.RemoveAt(pluginList.IndexOf(sauEntry));
+                        pluginList.Insert(Math.Min(1, pluginList.Count), sauEntry);
+                    }
+                }
                 // 市场名：Codex 插件
                 mktRoot["name"] = MergedMarketId;
                 Dictionary<string, object> ifc = JD(mktRoot, "interface") as Dictionary<string, object>;
@@ -2895,7 +2956,9 @@ namespace CodexAppInstaller
                 sb.AppendLine("source = '" + baseDir + "'");
                 File.WriteAllText(configPath, cfg + "\r\n" + sb.ToString(), new UTF8Encoding(false));
                 cfg = File.ReadAllText(configPath, Encoding.UTF8);
-                Ok("已注册: " + MergedMarketDisplay + "（" + pluginList.Count + " 个插件，国内直连" + (added > 0 ? "，并入暴喵精选 " + added + " 个" : "") + (manifestMerged ? "，清单未变化" : "") + "）");
+                Ok("已注册: " + MergedMarketDisplay + "（" + pluginList.Count + " 个插件，国内直连"
+                    + (added > 0 ? "，并入精选/社媒插件 " + added + " 个" : "")
+                    + (!manifestMerged ? "，清单已刷新" : "") + "）");
                 return true;
             }
             catch (Exception ex)
@@ -2903,6 +2966,48 @@ namespace CodexAppInstaller
                 Warn("合并市场构建失败: " + Trunc(ex.Message));
                 return false;
             }
+        }
+
+        // 生成社媒插件包装清单（.codex-plugin/plugin.json）：仓库 skills/ 原生（18 个平台 skill）+ 中文展示信息
+        private static void WriteSauPluginJson(string pluginDir, string commit)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(pluginDir, ".codex-plugin"));
+                Dictionary<string, object> r = new Dictionary<string, object>();
+                r["name"] = SauPluginName;
+                r["version"] = "1.0.0";
+                r["description"] = "一键将视频/图文自动发布到抖音、小红书、B站、快手、视频号、TikTok、YouTube 等 18 个社媒平台（基于开源项目 social-auto-upload 的 sau CLI）。";
+                Dictionary<string, object> author = new Dictionary<string, object>();
+                author["name"] = "dreammis";
+                author["url"] = "https://github.com/dreammis";
+                r["author"] = author;
+                r["repository"] = "https://github.com/dreammis/social-auto-upload";
+                r["homepage"] = "https://github.com/dreammis/social-auto-upload";
+                r["license"] = "MIT-0";
+                ArrayList kw = new ArrayList();
+                string[] kws = new string[] { "social-auto-upload", "视频上传", "一键分发", "抖音", "小红书", "bilibili", "tiktok", "自媒体", "social", "upload" };
+                foreach (string k in kws) kw.Add(k);
+                r["keywords"] = kw;
+                r["skills"] = "./skills/";
+                Dictionary<string, object> ifc = new Dictionary<string, object>();
+                ifc["displayName"] = "社媒视频一键分发";
+                ifc["shortDescription"] = "一键将视频/图文分发到抖音、小红书、B站等 18 个平台。";
+                ifc["longDescription"] = "基于开源项目 social-auto-upload 的多平台内容分发工具箱：内置 18 个平台 Skill（抖音、小红书、B站、快手、视频号、TikTok、YouTube、微博、知乎等），由 Codex 引导完成账号登录（cookie 校验）、内容核对与一键发布。首次使用会按 Skill 指引安装 sau CLI 并配置目标平台账号；平台登录页面操作由用户完成，不索取或保存平台密码。";
+                ifc["developerName"] = "dreammis";
+                ifc["category"] = "Productivity";
+                ArrayList caps = new ArrayList();
+                caps.Add("Read"); caps.Add("Write"); caps.Add("Network");
+                ifc["capabilities"] = caps;
+                ArrayList dp = new ArrayList();
+                dp.Add("把这个视频一键发布到抖音、小红书和 B 站");
+                dp.Add("检查当前各平台账号的登录状态");
+                dp.Add("把这条图文内容分发到我指定的社媒平台");
+                ifc["defaultPrompt"] = dp;
+                r["interface"] = ifc;
+                File.WriteAllText(Path.Combine(pluginDir, ".codex-plugin", "plugin.json"), new JavaScriptSerializer().Serialize(r), new UTF8Encoding(false));
+            }
+            catch (Exception ex) { Warn("社媒插件包装生成失败（不影响清单注册）: " + Trunc(ex.Message)); }
         }
 
         // 递归复制目录
