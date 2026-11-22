@@ -172,6 +172,7 @@ namespace CodexAppInstaller
             private int _lastViewTop = -1, _lastW = -1, _lastH = -1;   // 重绘节流：视口行/尺寸缓存
 
             private static string At(int row, int col) { return "\x1b[" + (row + 1) + ";" + (col + 1) + "H"; }
+            private const string Reset = "\x1b[0m";
 
             public PanelUi(TextWriter log, TextWriter raw) { _log = log; _raw = raw; }
             public override Encoding Encoding { get { return _log.Encoding; } }
@@ -246,10 +247,11 @@ namespace CodexAppInstaller
 
             // 视口统一：buffer 与视口尺寸不一致（scrollback 分裂态）或视口未顶格（T≠0）时，
             // VT 定位（视口相对）与 WriteConsoleOutputW（buffer 绝对）两套坐标会错位——
-            // 把视口顶回 0、buffer 收缩到视口尺寸；失败则 Draw 按各自语义修正坐标兜底
+            // 把视口顶回 0、buffer 收缩到视口尺寸；失败则 Draw 按各自语义修正坐标兜底。
+            // 某些终端（客户机 WT）下这些调用可能滞后生效，故重读验证 + 多轮重试直到稳定
             private static void SyncViewport(IntPtr h)
             {
-                try
+                for (int round = 0; round < 3; round++)
                 {
                     CONSOLE_SCREEN_BUFFER_INFO info;
                     if (!GetConsoleScreenBufferInfo(h, out info)) return;
@@ -258,20 +260,24 @@ namespace CodexAppInstaller
                     bool moved = info.srWindow.T != 0 || info.srWindow.L != 0;
                     bool split = info.dwSize.X != W || info.dwSize.Y != H;
                     if (!moved && !split) return;
-                    SMALL_RECT small = new SMALL_RECT();
-                    small.L = 0; small.T = 0;
-                    small.R = (short)Math.Max(10, Math.Min(W, info.dwSize.X) - 1);
-                    small.B = (short)Math.Max(5, Math.Min(H, info.dwSize.Y) - 1);
-                    SetConsoleWindowInfo(h, true, ref small);
-                    if (split) SetConsoleScreenBufferSize(h, new COORD((short)W, (short)H));
-                    SMALL_RECT full = new SMALL_RECT();
-                    full.L = 0; full.T = 0; full.R = (short)(W - 1); full.B = (short)(H - 1);
-                    SetConsoleWindowInfo(h, true, ref full);
+                    try
+                    {
+                        SMALL_RECT small = new SMALL_RECT();
+                        small.L = 0; small.T = 0;
+                        small.R = (short)Math.Max(10, Math.Min(W, info.dwSize.X) - 1);
+                        small.B = (short)Math.Max(5, Math.Min(H, info.dwSize.Y) - 1);
+                        SetConsoleWindowInfo(h, true, ref small);
+                        if (split) SetConsoleScreenBufferSize(h, new COORD((short)W, (short)H));
+                        SMALL_RECT full = new SMALL_RECT();
+                        full.L = 0; full.T = 0; full.R = (short)(W - 1); full.B = (short)(H - 1);
+                        SetConsoleWindowInfo(h, true, ref full);
+                    }
+                    catch { }
+                    System.Threading.Thread.Sleep(15);   // 给终端桥接一点生效时间
                 }
-                catch { }
             }
 
-            // 面板状态快照（覆盖式单行）：客户机上若渲染异常，回传 %TEMP%\xode_panel_info.txt 即可定位
+            // 面板状态日志（追加式）：客户机上若渲染异常，回传 %TEMP%\xode_panel_info.txt 全序列即可定位
             private static void DiagSnapshot(IntPtr h, string tag)
             {
                 try
@@ -279,13 +285,15 @@ namespace CodexAppInstaller
                     CONSOLE_SCREEN_BUFFER_INFO info;
                     if (!GetConsoleScreenBufferInfo(h, out info)) return;
                     string s = string.Format(
-                        "{0} {1}: buffer={2}x{3} window={4}x{5} viewTop={6} cursor=({7},{8}) max={9}x{10}",
+                        "{0} {1}: buffer={2}x{3} window={4}x{5} viewTop={6} cursor=({7},{8}) max={9}x{10}\r\n",
                         DateTime.Now.ToString("MM-dd HH:mm:ss"), tag,
                         info.dwSize.X, info.dwSize.Y,
                         info.srWindow.R - info.srWindow.L + 1, info.srWindow.B - info.srWindow.T + 1,
                         info.srWindow.T, info.dwCursorPosition.X, info.dwCursorPosition.Y,
                         info.dwMaximumWindowSize.X, info.dwMaximumWindowSize.Y);
-                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "xode_panel_info.txt"), s + "\r\n");
+                    string p = Path.Combine(Path.GetTempPath(), "xode_panel_info.txt");
+                    if (File.Exists(p) && new FileInfo(p).Length > 256 * 1024) File.Delete(p);
+                    File.AppendAllText(p, s);
                 }
                 catch { }
             }
@@ -407,6 +415,7 @@ namespace CodexAppInstaller
                         int viewTop = info.srWindow.T;
                         if (!force && viewTop == _lastViewTop && W == _lastW && H == _lastH) return;
                         _lastViewTop = viewTop; _lastW = W; _lastH = H;
+                        DiagSnapshot(h, force ? "draw-init" : "draw-scroll");   // 记录每次重绘时的真实视口状态
                         int bw = Math.Min(PanelW, W - 1);
                         int bx = W - bw;
                         int innerW = bw - 2;
@@ -416,20 +425,21 @@ namespace CodexAppInstaller
                         if (saveC < 0) saveC = 0;
                         if (saveR < viewTop) saveR = viewTop; else if (saveR >= viewTop + H) saveR = viewTop + H - 1;
 
-                        // 结构层：黑底清残留 + 青色细边框 + QR 半块
-                        CHAR_INFO[] cells = new CHAR_INFO[bw * H];
-                        for (int i = 0; i < cells.Length; i++) { cells[i].UnicodeChar = ' '; cells[i].Attributes = AttrBlackBg; }
-                        for (int x2 = 0; x2 < bw; x2++)
+                        // 结构层：黑底清残留 + 青色细边框（全 VT 视口相对行——终端自己维护视口语义，
+                        // 免疫 buffer/视口分裂与桥接实现差异；WriteConsoleOutput 的 buffer 绝对坐标
+                        // 在 scrollback/视口漂移的终端上与本应用脱节，客户机已实测弃用）
+                        StringBuilder sb = new StringBuilder(256);
+                        for (int y = 0; y < H; y++)
                         {
-                            SetCell(cells, bw, 0, x2, x2 == 0 ? '┌' : (x2 == bw - 1 ? '┐' : '─'), AttrTeal);
-                            SetCell(cells, bw, H - 1, x2, x2 == 0 ? '└' : (x2 == bw - 1 ? '┘' : '─'), AttrTeal);
+                            sb.Length = 0;
+                            sb.Append(At(y, bx));
+                            if (y == 0) sb.Append("\x1b[36m┌").Append('─', bw - 2).Append("┐");
+                            else if (y == H - 1) sb.Append("\x1b[36m└").Append('─', bw - 2).Append("┘");
+                            else sb.Append("\x1b[36m│\x1b[40m").Append(' ', bw - 2).Append("\x1b[36m│");
+                            sb.Append(Reset);
+                            _raw.Write(sb.ToString());
                         }
-                        for (int y = 1; y < H - 1; y++)
-                        {
-                            SetCell(cells, bw, y, 0, '│', AttrTeal);
-                            SetCell(cells, bw, y, bw - 1, '│', AttrTeal);
-                        }
-                        // 内容（垂直居中）：QR（37 模块，半块 1 字符列 = 1 模块列）
+                        // 内容（垂直居中）：QR（37 模块，半块 1 字符列 = 1 模块列；黑白 16 色短码 RLE）
                         int innerH = H - 2;
                         int top = 1 + (innerH - ContentH) / 2;
                         if (top < 1) top = 1;
@@ -438,24 +448,25 @@ namespace CodexAppInstaller
                         for (int pr = 0; pr < QrCellRows && qrY + pr < H - 1; pr++)
                         {
                             int mTop = pr * 2, mBot = mTop + 1;
+                            sb.Length = 0;
+                            sb.Append(At(qrY + pr, bx + qrX));
+                            bool pTop = false, pBot = false, first = true;
                             for (int c2 = 0; c2 < QrModules; c2++)
                             {
                                 bool dTop = KefuQrMatrix[mTop][c2] == '1';
                                 bool dBot = mBot < QrModules && KefuQrMatrix[mBot][c2] == '1';
-                                ushort attr = (ushort)((dTop ? AttrBlackFg : AttrWhiteFg) | (dBot ? AttrBlackBg : AttrWhiteBg));
-                                SetCell(cells, bw, qrY + pr, qrX + c2, dTop == dBot ? ' ' : '▀', attr);
+                                if (first || dTop != pTop || dBot != pBot)
+                                {
+                                    sb.Append(dTop ? "\x1b[30m" : "\x1b[37m").Append(dBot ? "\x1b[40m" : "\x1b[47m");
+                                    pTop = dTop; pBot = dBot; first = false;
+                                }
+                                sb.Append(dTop == dBot ? ' ' : '▀');
                             }
+                            sb.Append(Reset);
+                            _raw.Write(sb.ToString());
                         }
-                        COORD bufSize = new COORD((short)bw, (short)H);
-                        COORD bufCoord = new COORD(0, 0);
-                        SMALL_RECT dest = new SMALL_RECT();
-                        dest.L = (short)bx; dest.T = (short)viewTop;
-                        dest.R = (short)(bx + bw - 1); dest.B = (short)(viewTop + H - 1);
-                        if (!WriteConsoleOutputW(h, cells, bufSize, bufCoord, ref dest))
-                            Diag("draw: WriteConsoleOutputW failed err=" + Marshal.GetLastWin32Error());
 
-                        // 文字层（含 CJK，覆盖在结构层之上）：VT CUP 定位是【视口相对】行，勿加 viewTop
-                        // （结构层 dest 是 buffer 绝对行——两套坐标以 viewTop 修正，T=0 时等价）
+                        // 文字层（含 CJK，覆盖在结构层之上）：VT CUP 定位是【视口相对】行
                         _raw.Write(At(top, bx + 1 + (innerW - 12) / 2)
                           + "\x1b[97mXode\x1b[36m AI \x1b[90m平台\x1b[0m");
                         _raw.Write(At(top + 2, bx + 1 + (innerW - 22) / 2) + "\x1b[90m复制网址到浏览器注册\x1b[0m");
@@ -466,12 +477,6 @@ namespace CodexAppInstaller
                     }
                     catch { }
                 }
-            }
-
-            private static void SetCell(CHAR_INFO[] cells, int bw, int row, int col, char ch, ushort attr)
-            {
-                int i = row * bw + col;
-                if (i >= 0 && i < cells.Length) { cells[i].UnicodeChar = ch; cells[i].Attributes = attr; }
             }
 
             // ---- 本机 Win32 ----
@@ -489,19 +494,10 @@ namespace CodexAppInstaller
             private static extern bool SetConsoleWindowInfo(IntPtr hConsoleOutput, bool bAbsolute, ref SMALL_RECT lpConsoleWindow);
             [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
             private static extern bool SetCurrentConsoleFontEx(IntPtr hConsoleOutput, bool bMaximumWindow, ref CONSOLE_FONT_INFO_EX lpConsoleCurrentFontEx);
-            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-            private static extern bool WriteConsoleOutputW(IntPtr hConsoleOutput, CHAR_INFO[] lpBuffer, COORD dwBufferSize, COORD dwBufferCoord, ref SMALL_RECT lpScreen);
             [DllImport("kernel32.dll")]
             private static extern IntPtr GetConsoleWindow();
 
             private const int StdOutputHandle = -11;
-
-            // 16 色属性（CHAR_INFO.Attributes，位序为 B|G|R）：conhost 下 DarkCyan=RGB(0,128,128) 品牌青
-            private const ushort AttrBlackFg = 0x0000;
-            private const ushort AttrWhiteFg = 0x000F;   // 亮白（R|G|B|I）
-            private const ushort AttrBlackBg = 0x0000;
-            private const ushort AttrWhiteBg = 0x00F0;   // 白底（QR 静区/亮模块）
-            private const ushort AttrTeal = 0x0003;      // DarkCyan（G|B）边框
 
             [StructLayout(LayoutKind.Sequential)]
             private struct COORD
@@ -529,12 +525,6 @@ namespace CodexAppInstaller
                 public int FontFamily;
                 public int FontWeight;
                 [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FaceName;
-            }
-            [StructLayout(LayoutKind.Explicit)]
-            private struct CHAR_INFO
-            {
-                [FieldOffset(0)] public ushort UnicodeChar;
-                [FieldOffset(2)] public ushort Attributes;
             }
         }
 
