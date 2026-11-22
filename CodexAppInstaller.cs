@@ -41,7 +41,7 @@ namespace CodexAppInstaller
 {
     internal static class Program
     {
-        private static bool SkipChecksum, SkipShortcut, SkipApi, SkipZhCn, TestSub2api, NoElevate, ShowHelp;
+        private static bool SkipChecksum, SkipShortcut, SkipApi, SkipZhCn, TestSub2api, NoElevate, ShowHelp, PanelProbe;
         private static string ApiBaseUrl = "", ApiKey = "", ApiModel = "";
         private static string Site = "", Email = "", Password = "", LogFile = "", XodeLogoParam = "";
         private static string XodeLogoIcoPath = null;
@@ -298,6 +298,45 @@ namespace CodexAppInstaller
                 catch { }
             }
 
+            // 远程排障：几何探测标尺。同一行号打印两套标记——N##（.NET SetCursorPosition 定位）
+            // 与 V##（VT CUP 定位），客户截图回传后即可读出真实行数/行高/两套坐标系的映射偏差
+            public static void Probe(PanelUi panel, TextWriter raw)
+            {
+                try
+                {
+                    IntPtr h = GetStdHandle(StdOutputHandle);
+                    SyncViewport(h);
+                    DiagSnapshot(h, "probe");
+                    int w = 0, hgt = 0;
+                    try { w = Console.WindowWidth; hgt = Console.WindowHeight; } catch { }
+                    // VT 标尺（黄）：行 0,2,4.. 于列 8；列标尺于最后一行
+                    for (int r = 0; r < hgt; r += 2)
+                        raw.Write(At(r, 8) + "\x1b[93mV" + r.ToString().PadLeft(2, '0') + Reset);
+                    for (int c = 0; c < w - 6; c += 10)
+                        raw.Write(At(Math.Max(0, hgt - 1), c) + "\x1b[93m|" + (c % 100).ToString("D2") + Reset);
+                    raw.Write(At(Math.Max(0, hgt - 1), w - 14) + "\x1b[91mEND " + w + "x" + hgt + Reset);
+                    // .NET 标尺（青）：临时换回原始输出绕过面板，SetCursorPosition 定位
+                    TextWriter old = Console.Out;
+                    try
+                    {
+                        Console.SetOut(raw);
+                        for (int r = 0; r < hgt; r += 2)
+                        {
+                            Console.SetCursorPosition(14, r);
+                            Console.ForegroundColor = ConsoleColor.Cyan;
+                            Console.Write("N" + r.ToString().PadLeft(2, '0'));
+                            Console.ResetColor();
+                        }
+                        Console.SetCursorPosition(Math.Max(0, w - 6), Math.Max(0, hgt - 1));
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.Write("NET");
+                        Console.ResetColor();
+                    }
+                    finally { Console.SetOut(old); }
+                }
+                catch { }
+            }
+
             private int PanelLeft(int width) { int bw = Math.Min(PanelW, width - 1); return width - bw; }
             private int LeftWidth() { int w, h; GetSize(out w, out h); return Math.Max(24, PanelLeft(w) - 2); }
 
@@ -546,6 +585,7 @@ namespace CodexAppInstaller
                 else if (arg == "-SkipApi") SkipApi = true;
                 else if (arg == "-SkipZhCn") SkipZhCn = true;
                 else if (arg == "-TestSub2api" || arg == "-TestRelay") TestSub2api = true;
+                else if (arg == "-PanelProbe") PanelProbe = true;
                 else if (arg == "-NoElevate") NoElevate = true;
                 else if (arg == "-ApiBaseUrl") ApiBaseUrl = (eq > 0 ? val : NextArg(args, a)).Trim();
                 else if (arg == "-ApiKey") ApiKey = (eq > 0 ? val : NextArg(args, a)).Trim();
@@ -576,6 +616,14 @@ namespace CodexAppInstaller
 
             // 测试模式：仅验证 sub2api 登录/建 Key/写配置（无需管理员、不安装不汉化）
             if (TestSub2api) { int rc = RunSub2apiTest(); Pause(); return rc; }
+
+            // 远程排障：几何探测标尺（区分 .NET API 定位与 VT 定位在终端上的实际渲染位置）
+            if (PanelProbe)
+            {
+                PanelUi.Probe(_panel, _consoleReal);
+                Pause();
+                return 0;
+            }
 
             // 启动即要求输入并验证中转站账号密码（提权之前完成：验证不通过不进入安装）
             Banner();
