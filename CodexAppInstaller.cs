@@ -409,7 +409,7 @@ namespace CodexAppInstaller
                           + "\x1b[97mXode\x1b[36m AI \x1b[90m平台\x1b[0m");
                         _raw.Write(At(viewTop + top + 2, bx + 1 + (innerW - 22) / 2) + "\x1b[90m复制网址到浏览器注册\x1b[0m");
                         _raw.Write(At(viewTop + top + 3, bx + 1 + (innerW - 23) / 2) + "\x1b[96mhttps://hub.xodeai.com\x1b[0m");
-                        _raw.Write(At(viewTop + top + 5, bx + 1 + (innerW - 32) / 2) + "\x1b[90m微信扫码联系客服，领买一送一福利\x1b[0m");
+                        _raw.Write(At(viewTop + top + 5, bx + 1 + (innerW - 28) / 2) + "\x1b[90m微信扫码联系客服，领免费额度\x1b[0m");
                         _raw.Write(At(saveR, saveC));   // 光标还原到左区
                     }
                     catch { }
