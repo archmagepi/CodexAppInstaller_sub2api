@@ -102,7 +102,7 @@ namespace CodexAppInstaller
             }
         }
 
-        // ================= 右侧品牌信息面板（Xode AI 平台 / 中转站网址 / 客服二维码） =================
+        // ================= 右侧品牌信息面板（Xode AI 平台 / 复制网址注册 / 客服二维码） =================
         // 踩坑记录（改布局前必读）：
         //  - 块字符 ▀ 必须 UTF-8 输出：Main 最前已设 OutputEncoding=UTF8（GBK 不含块字符，写出变 '?'）
         //  - ANSI 真彩需在 stdout 句柄开 ENABLE_VIRTUAL_TERMINAL_PROCESSING(0x0004)，否则转义码原样打印
@@ -404,12 +404,12 @@ namespace CodexAppInstaller
                         dest.R = (short)(bx + bw - 1); dest.B = (short)(viewTop + H - 1);
                         WriteConsoleOutputW(h, cells, bufSize, bufCoord, ref dest);
 
-                        // 文字层（含 CJK，覆盖在结构层之上）：1 Xode AI 平台 / 2 中转站网址 / 3 客服二维码
+                        // 文字层（含 CJK，覆盖在结构层之上）：1 Xode AI 平台 / 2 复制网址到浏览器注册 / 3 客服二维码（领福利）
                         _raw.Write(At(viewTop + top, bx + 1 + (innerW - 12) / 2)
                           + "\x1b[97mXode\x1b[36m AI \x1b[90m平台\x1b[0m");
-                        _raw.Write(At(viewTop + top + 2, bx + 1 + (innerW - 10) / 2) + "\x1b[90m中转站网址\x1b[0m");
+                        _raw.Write(At(viewTop + top + 2, bx + 1 + (innerW - 22) / 2) + "\x1b[90m复制网址到浏览器注册\x1b[0m");
                         _raw.Write(At(viewTop + top + 3, bx + 1 + (innerW - 23) / 2) + "\x1b[96mhttps://hub.xodeai.com\x1b[0m");
-                        _raw.Write(At(viewTop + top + 5, bx + 1 + (innerW - 16) / 2) + "\x1b[90m微信扫码联系客服\x1b[0m");
+                        _raw.Write(At(viewTop + top + 5, bx + 1 + (innerW - 32) / 2) + "\x1b[90m微信扫码联系客服，领买一送一福利\x1b[0m");
                         _raw.Write(At(saveR, saveC));   // 光标还原到左区
                     }
                     catch { }
@@ -528,7 +528,7 @@ namespace CodexAppInstaller
                 catch { }
             }
 
-            // 右侧品牌信息面板（Xode AI 平台 / 中转站网址 / 客服二维码）；初始化失败则退化为普通全宽输出
+            // 右侧品牌信息面板（Xode AI 平台 / 复制网址注册 / 客服二维码）；初始化失败则退化为普通全宽输出
             _panel = PanelUi.TryCreate(_consoleReal);
             if (ShowHelp) { PrintUsage(); Pause(); return 0; }
 
@@ -555,7 +555,7 @@ namespace CodexAppInstaller
                         if (mk.Length > 0) { ApiKey = mk; preManualKey = true; Ok("将使用手动提供的 API Key。"); }
                         else { preSkipApi = true; Warn("未提供 Key，将跳过聚合 API 配置。"); }
                     }
-                    else { preSkipApi = true; Warn("已选择跳过 AI中转站 配置，仅安装应用。"); }
+                    else { preSkipApi = true; Warn("已选择跳过 Xode AI平台 配置，仅安装应用。"); }
                 }
             }
 
@@ -607,7 +607,7 @@ namespace CodexAppInstaller
                 }
                 else if (manualKey)
                 {
-                    Ok("使用命令行提供的 API Key（跳过 AI中转站 登录）");
+                    Ok("使用命令行提供的 API Key（跳过 Xode AI平台 登录）");
                 }
 
                 // 步骤 2/11：检查更新 → 下载并安装 Codex Desktop（已装且最新则跳过 1GB 下载）
@@ -720,7 +720,7 @@ namespace CodexAppInstaller
             Console.WriteLine("===============================================");
             Console.WriteLine(" Codex App（ChatGPT Desktop）一键安装程序（" + BuildInfo.Time + "版本）");
             Console.WriteLine("===============================================");
-            Console.WriteLine(" 说明: 自动安装 Codex App、配置 AI中转站、启用汉化、内置中文插件市场");
+            Console.WriteLine(" 说明: 自动安装 Codex App、配置 Xode AI平台、启用汉化与中文插件市场");
         }
         private static void Pause()
         {
@@ -947,8 +947,8 @@ namespace CodexAppInstaller
         // 登录交互（最多 3 次），成功返回 access_token；全部失败返回 null
         private static string Sub2apiLoginFlow()
         {
-            Step("1/11 连接 AI中转站: " + GetSite());
-            Console.WriteLine("  说明: 将登录 AI中转站 并自动创建/复用 API Key「" + Sub2apiKeyName + "」");
+            Step("1/11 连接 Xode AI平台: " + GetSite());
+            Console.WriteLine("  说明: 将登录 Xode AI平台 并自动创建/复用 API Key「" + Sub2apiKeyName + "」");
             string email = Email != null ? Email.Trim() : "";
             string pwd = Password != null ? Password.Trim() : "";
             bool fromArgs = email.Length > 0 && pwd.Length > 0;
@@ -958,7 +958,7 @@ namespace CodexAppInstaller
                 {
                     if (email.Length == 0 || pwd.Length == 0)
                     {
-                        Console.Write("  请输入 AI中转站 账号（邮箱）" + (attempt > 1 ? "（第 " + attempt + "/3 次）" : "") + ": ");
+                        Console.Write("  请输入 Xode AI平台 账号（邮箱）" + (attempt > 1 ? "（第 " + attempt + "/3 次）" : "") + ": ");
                         email = SafeReadLine().Trim();
                         Console.Write("  请输入密码: ");
                         pwd = ReadPassword();
@@ -1401,7 +1401,7 @@ namespace CodexAppInstaller
         private static int RunSub2apiTest()
         {
             Banner();
-            Ok("测试模式: 仅验证 AI中转站 登录 / 建 Key / 配置写入（不安装、不汉化、无需管理员）");
+            Ok("测试模式: 仅验证 Xode AI平台 登录 / 建 Key / 配置写入（不安装、不汉化、无需管理员）");
             try
             {
                 string token = Sub2apiLoginFlow();
@@ -2067,7 +2067,7 @@ namespace CodexAppInstaller
             string path = CodexHomePath("config.toml");
             BackupFile(path);
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("# Generated by CodexAppInstaller (AI中转站)");
+            sb.AppendLine("# Generated by CodexAppInstaller (Xode AI平台)");
             sb.AppendLine("# 默认 provider = " + primary.GroupName + "#" + primary.GroupId
                           + "；切换：codex --profile g<分组id>，或改 model_provider");
             sb.AppendLine("model_provider = \"OpenAI\"");
@@ -3131,7 +3131,7 @@ namespace CodexAppInstaller
             Console.ResetColor();
             if (appx != null) Console.WriteLine(" [完成] Codex Desktop 已安装: " + appx.Name + " " + appx.Version);
             if (!string.IsNullOrEmpty(key))
-                Console.WriteLine(" [完成] AI中转站（" + GetSite() + "）API Key「" + Sub2apiKeyName + "」: " + MaskKey(key));
+                Console.WriteLine(" [完成] Xode AI平台（" + GetSite() + "）API Key「" + Sub2apiKeyName + "」: " + MaskKey(key));
             Console.WriteLine(" [完成] 配置: 搜索=live、Full Access、记忆=开、启动更新检查=关");
             if (XodeBrandingOk)
                 Console.WriteLine(" [完成] Xode AI 品牌化: 桌面/启动器图标已更换");
@@ -3159,19 +3159,19 @@ namespace CodexAppInstaller
             Console.WriteLine("用法: CodexAppInstaller.exe [参数...]");
             Console.WriteLine();
             Console.WriteLine("参数:");
-            Console.WriteLine("  -Site <url>        AI中转站地址（默认 " + Sub2apiSiteDefault + "）");
-            Console.WriteLine("  -Email <邮箱>      AI中转站 账号（免交互，登录站点创建/复用 Key）");
-            Console.WriteLine("  -Password <密码>   AI中转站 密码（免交互）");
+            Console.WriteLine("  -Site <url>        Xode AI平台地址（默认 " + Sub2apiSiteDefault + "）");
+            Console.WriteLine("  -Email <邮箱>      Xode AI平台 账号（免交互，登录站点创建/复用 Key）");
+            Console.WriteLine("  -Password <密码>   Xode AI平台 密码（免交互）");
             Console.WriteLine("  -SkipChecksum      跳过 SHA256 校验（不推荐）");
             Console.WriteLine("  -SkipShortcut      不创建桌面快捷方式");
-            Console.WriteLine("  -SkipApi           跳过 AI中转站 配置");
+            Console.WriteLine("  -SkipApi           跳过 Xode AI平台 配置");
             Console.WriteLine("  -SkipZhCn          跳过汉化");
-            Console.WriteLine("  -TestRelay         仅测试 AI中转站 登录/建Key/写配置（不安装不汉化，无需管理员）");
+            Console.WriteLine("  -TestRelay         仅测试 Xode AI平台 登录/建Key/写配置（不安装不汉化，无需管理员）");
             Console.WriteLine("  -NoElevate         跳过 UAC 提权（高级：机器级注册与部分汉化操作可能失败）");
             Console.WriteLine("  -LogFile <path>    输出同时写入日志文件（提权运行时留档排障）");
             Console.WriteLine("  -Logo <path>       Xode AI logo（ico/png，用于桌面与启动器图标品牌化；默认取安装器同目录 xode-logo.ico/png）");
             Console.WriteLine("  -ApiBaseUrl <url>  手动模式的聚合端点（默认 " + DefaultApiBaseUrl + "，需 OpenAI Responses 兼容）");
-            Console.WriteLine("  -ApiKey <key>      手动模式 API Key（提供后跳过 AI中转站 登录，格式 sk-xxxxxx）");
+            Console.WriteLine("  -ApiKey <key>      手动模式 API Key（提供后跳过 Xode AI平台 登录，格式 sk-xxxxxx）");
             Console.WriteLine("  -ApiModel <model>  手动模式模型（默认 " + DefaultModel + "）");
         }
     }
