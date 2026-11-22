@@ -188,6 +188,15 @@ namespace CodexAppInstaller
                     if (!p.Setup()) { Diag("fail: setup"); return null; }
                     Console.SetOut(p);
                     p.Draw(true);
+                    // resize 竞态兜底：部分终端（实测客户 WT）窗口重排滞后于 API 返回，首帧可能错位
+                    // 且初始阶段无滚动触发重画——稳定后后台补画一帧自愈
+                    System.Threading.Thread selfHeal = new System.Threading.Thread(delegate()
+                    {
+                        System.Threading.Thread.Sleep(500);
+                        try { p.Draw(true); } catch { }
+                    });
+                    selfHeal.IsBackground = true;
+                    selfHeal.Start();
                     return p;
                 }
                 catch (Exception ex) { Diag("fail: ex " + ex.GetType().Name + " " + ex.Message); return null; }
@@ -818,6 +827,7 @@ namespace CodexAppInstaller
             {
                 if (Console.IsInputRedirected) return;
                 Console.WriteLine("\n按任意键退出...");
+                try { if (_panel != null) _panel.Draw(true); } catch { }   // 最终画面补画
                 Console.ReadKey(true);
             }
             catch { }
@@ -874,12 +884,14 @@ namespace CodexAppInstaller
         }
         private static string SafeReadLine()
         {
+            try { if (_panel != null) _panel.Draw(true); } catch { }   // 交互静止期补画：自愈初始竞态错位
             try { return Console.ReadLine() ?? ""; }
             catch { return ""; }
         }
         // 密码输入（回显 *；输入被重定向时退化为普通读取）
         private static string ReadPassword()
         {
+            try { if (_panel != null) _panel.Draw(true); } catch { }   // 交互静止期补画
             try
             {
                 if (Console.IsInputRedirected) return SafeReadLine();
