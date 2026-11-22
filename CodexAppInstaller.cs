@@ -209,6 +209,8 @@ namespace CodexAppInstaller
                 }
                 catch { }
                 ResizeWindow(h, 124, 44);
+                SyncViewport(h);
+                DiagSnapshot(h, "setup");
                 int w, hh;
                 GetSize(out w, out hh);
                 return w >= 92 && hh >= 28;   // 内容最小 26 行 + 上下边框；宽度需容纳面板 52 列 + 左区可读
@@ -240,6 +242,52 @@ namespace CodexAppInstaller
             {
                 try { w = Console.WindowWidth; h = Console.WindowHeight; }
                 catch { w = 124; h = 44; }
+            }
+
+            // 视口统一：buffer 与视口尺寸不一致（scrollback 分裂态）或视口未顶格（T≠0）时，
+            // VT 定位（视口相对）与 WriteConsoleOutputW（buffer 绝对）两套坐标会错位——
+            // 把视口顶回 0、buffer 收缩到视口尺寸；失败则 Draw 按各自语义修正坐标兜底
+            private static void SyncViewport(IntPtr h)
+            {
+                try
+                {
+                    CONSOLE_SCREEN_BUFFER_INFO info;
+                    if (!GetConsoleScreenBufferInfo(h, out info)) return;
+                    int W = info.srWindow.R - info.srWindow.L + 1;
+                    int H = info.srWindow.B - info.srWindow.T + 1;
+                    bool moved = info.srWindow.T != 0 || info.srWindow.L != 0;
+                    bool split = info.dwSize.X != W || info.dwSize.Y != H;
+                    if (!moved && !split) return;
+                    SMALL_RECT small = new SMALL_RECT();
+                    small.L = 0; small.T = 0;
+                    small.R = (short)Math.Max(10, Math.Min(W, info.dwSize.X) - 1);
+                    small.B = (short)Math.Max(5, Math.Min(H, info.dwSize.Y) - 1);
+                    SetConsoleWindowInfo(h, true, ref small);
+                    if (split) SetConsoleScreenBufferSize(h, new COORD((short)W, (short)H));
+                    SMALL_RECT full = new SMALL_RECT();
+                    full.L = 0; full.T = 0; full.R = (short)(W - 1); full.B = (short)(H - 1);
+                    SetConsoleWindowInfo(h, true, ref full);
+                }
+                catch { }
+            }
+
+            // 面板状态快照（覆盖式单行）：客户机上若渲染异常，回传 %TEMP%\xode_panel_info.txt 即可定位
+            private static void DiagSnapshot(IntPtr h, string tag)
+            {
+                try
+                {
+                    CONSOLE_SCREEN_BUFFER_INFO info;
+                    if (!GetConsoleScreenBufferInfo(h, out info)) return;
+                    string s = string.Format(
+                        "{0} {1}: buffer={2}x{3} window={4}x{5} viewTop={6} cursor=({7},{8}) max={9}x{10}",
+                        DateTime.Now.ToString("MM-dd HH:mm:ss"), tag,
+                        info.dwSize.X, info.dwSize.Y,
+                        info.srWindow.R - info.srWindow.L + 1, info.srWindow.B - info.srWindow.T + 1,
+                        info.srWindow.T, info.dwCursorPosition.X, info.dwCursorPosition.Y,
+                        info.dwMaximumWindowSize.X, info.dwMaximumWindowSize.Y);
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "xode_panel_info.txt"), s + "\r\n");
+                }
+                catch { }
             }
 
             private int PanelLeft(int width) { int bw = Math.Min(PanelW, width - 1); return width - bw; }
@@ -351,6 +399,7 @@ namespace CodexAppInstaller
                     try
                     {
                         IntPtr h = GetStdHandle(StdOutputHandle);
+                        SyncViewport(h);   // buffer==视口 且顶格，否则两套坐标系分裂（客户机实测）
                         CONSOLE_SCREEN_BUFFER_INFO info;
                         if (!GetConsoleScreenBufferInfo(h, out info)) return;
                         int W = info.srWindow.R - info.srWindow.L + 1;
@@ -402,15 +451,18 @@ namespace CodexAppInstaller
                         SMALL_RECT dest = new SMALL_RECT();
                         dest.L = (short)bx; dest.T = (short)viewTop;
                         dest.R = (short)(bx + bw - 1); dest.B = (short)(viewTop + H - 1);
-                        WriteConsoleOutputW(h, cells, bufSize, bufCoord, ref dest);
+                        if (!WriteConsoleOutputW(h, cells, bufSize, bufCoord, ref dest))
+                            Diag("draw: WriteConsoleOutputW failed err=" + Marshal.GetLastWin32Error());
 
-                        // 文字层（含 CJK，覆盖在结构层之上）：1 Xode AI 平台 / 2 复制网址到浏览器注册 / 3 客服二维码（领福利）
-                        _raw.Write(At(viewTop + top, bx + 1 + (innerW - 12) / 2)
+                        // 文字层（含 CJK，覆盖在结构层之上）：VT CUP 定位是【视口相对】行，勿加 viewTop
+                        // （结构层 dest 是 buffer 绝对行——两套坐标以 viewTop 修正，T=0 时等价）
+                        _raw.Write(At(top, bx + 1 + (innerW - 12) / 2)
                           + "\x1b[97mXode\x1b[36m AI \x1b[90m平台\x1b[0m");
-                        _raw.Write(At(viewTop + top + 2, bx + 1 + (innerW - 22) / 2) + "\x1b[90m复制网址到浏览器注册\x1b[0m");
-                        _raw.Write(At(viewTop + top + 3, bx + 1 + (innerW - 23) / 2) + "\x1b[96mhttps://hub.xodeai.com\x1b[0m");
-                        _raw.Write(At(viewTop + top + 5, bx + 1 + (innerW - 28) / 2) + "\x1b[90m微信扫码联系客服，领\x1b[96m免费额度\x1b[0m");
-                        _raw.Write(At(saveR, saveC));   // 光标还原到左区
+                        _raw.Write(At(top + 2, bx + 1 + (innerW - 22) / 2) + "\x1b[90m复制网址到浏览器注册\x1b[0m");
+                        _raw.Write(At(top + 3, bx + 1 + (innerW - 23) / 2) + "\x1b[96mhttps://hub.xodeai.com\x1b[0m");
+                        _raw.Write(At(top + 5, bx + 1 + (innerW - 28) / 2) + "\x1b[90m微信扫码联系客服，领\x1b[96m免费额度\x1b[0m");
+                        _raw.Write(At(saveR - viewTop, saveC));   // 光标还原到左区（视口相对）
+                        if (force) DiagSnapshot(h, "draw");
                     }
                     catch { }
                 }
