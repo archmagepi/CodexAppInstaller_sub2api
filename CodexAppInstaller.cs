@@ -188,12 +188,16 @@ namespace CodexAppInstaller
                     if (!p.Setup()) { Diag("fail: setup"); return null; }
                     Console.SetOut(p);
                     p.Draw(true);
-                    // resize 竞态兜底：部分终端（实测客户 WT）窗口重排滞后于 API 返回，首帧可能错位
-                    // 且初始阶段无滚动触发重画——稳定后后台补画一帧自愈
+                    // 初始自愈心跳：登录前的输出 <44 行、无滚动事件触发重画，而终端窗口重排何时完成
+                    // 程序无法感知（客户机实测首帧错位会一直挂着）——每秒补画一帧，直到内容滚动进入
+                    // 安装流程（滚动后本就每行强制重画，心跳自动退场）
                     System.Threading.Thread selfHeal = new System.Threading.Thread(delegate()
                     {
-                        System.Threading.Thread.Sleep(500);
-                        try { p.Draw(true); } catch { }
+                        for (int i = 0; i < 30; i++)   // 最多 30 秒
+                        {
+                            System.Threading.Thread.Sleep(1000);
+                            try { if (p.HealTick()) break; } catch { break; }
+                        }
                     });
                     selfHeal.IsBackground = true;
                     selfHeal.Start();
@@ -333,6 +337,26 @@ namespace CodexAppInstaller
                     File.AppendAllText(p, s);
                 }
                 catch { }
+            }
+
+            // 初始自愈心跳：返回 true = 内容已滚动进入安装流程（可停止补画）
+            public bool HealTick()
+            {
+                lock (_sync)
+                {
+                    try
+                    {
+                        IntPtr h = GetStdHandle(StdOutputHandle);
+                        CONSOLE_SCREEN_BUFFER_INFO info;
+                        if (!GetConsoleScreenBufferInfo(h, out info)) return false;
+                        int rows = info.srWindow.B - info.srWindow.T + 1;
+                        int cursorRow = info.dwCursorPosition.Y - info.srWindow.T;
+                        if (rows > 0 && cursorRow >= rows - 5) return true;   // 内容已接近视口底部 → 滚动阶段
+                        Draw(true);   // 终端重排完成后此帧必然落在正确位置
+                        return false;
+                    }
+                    catch { return true; }
+                }
             }
 
             // 远程排障：几何探测标尺。同一行号打印两套标记——N##（.NET SetCursorPosition 定位）
@@ -615,6 +639,15 @@ namespace CodexAppInstaller
         }
 
         [STAThread]
+        // 确保右侧面板已初始化（幂等；失败则 _panel 为 null 走普通全宽输出）
+        private static void EnsurePanel()
+        {
+            if (_panel == null)
+            {
+                try { _panel = PanelUi.TryCreate(_consoleReal); } catch { _panel = null; }
+            }
+        }
+
         private static int Main(string[] args)
         {
             try { Console.Title = "Xode AI — Codex App 一键安装程序"; } catch { }
@@ -657,48 +690,27 @@ namespace CodexAppInstaller
                 catch { }
             }
 
-            // 右侧品牌信息面板（Xode AI 平台 / 复制网址注册 / 客服二维码）；初始化失败则退化为普通全宽输出
-            _panel = PanelUi.TryCreate(_consoleReal);
-            if (ShowHelp) { PrintUsage(); Pause(); return 0; }
+            // 右侧品牌信息面板：工具路径（-h/-TestRelay/-PanelProbe）无需管理员，在当前窗口初始化；
+            // 正常安装路径在提权门之后的新窗口里初始化——登录输入与安装全程都在排版正常的提权窗口
+            if (ShowHelp) { EnsurePanel(); PrintUsage(); Pause(); return 0; }
 
             // 测试模式：仅验证 sub2api 登录/建 Key/写配置（无需管理员、不安装不汉化）
-            if (TestSub2api) { int rc = RunSub2apiTest(); Pause(); return rc; }
+            if (TestSub2api) { EnsurePanel(); int rc = RunSub2apiTest(); Pause(); return rc; }
 
             // 远程排障：几何探测标尺（区分 .NET API 定位与 VT 定位在终端上的实际渲染位置）
             if (PanelProbe)
             {
+                EnsurePanel();
                 PanelUi.Probe(_panel, _consoleReal);
                 Pause();
                 return 0;
             }
 
-            // 启动即要求输入并验证中转站账号密码（提权之前完成：验证不通过不进入安装）
-            Banner();
-            try { GetArch(); }
-            catch (Exception ex) { Fail(ex.Message); Pause(); return 1; }
-            string startToken = null;
-            bool preManualKey = false, preSkipApi = false;
-            if (!SkipApi && string.IsNullOrEmpty(ApiKey))
-            {
-                startToken = Sub2apiLoginFlow();
-                if (startToken == null)
-                {
-                    Console.Write("  是否改用手动粘贴 API Key 完成配置？[Y/n] ");
-                    string ans = SafeReadLine().Trim().ToLower();
-                    if (ans == "" || ans == "y" || ans == "yes")
-                    {
-                        Console.Write("  API Key（格式 sk-xxxxxx）: ");
-                        string mk = SafeReadLine().Trim();
-                        if (mk.Length > 0) { ApiKey = mk; preManualKey = true; Ok("将使用手动提供的 API Key。"); }
-                        else { preSkipApi = true; Warn("未提供 Key，将跳过聚合 API 配置。"); }
-                    }
-                    else { preSkipApi = true; Warn("已选择跳过 Xode AI平台 配置，仅安装应用。"); }
-                }
-            }
-
+            // 提权门：正常安装路径最先申请管理员权限。登录输入与安装全程都在提权后的新窗口进行，
+            // 避开未提权启动窗口的渲染竞态（客户机实测错位）；该窗口只显示一行提示、存活数秒即退
             if (!NoElevate && !IsAdministrator())
             {
-                Console.WriteLine("请求管理员权限，请在 UAC 弹窗中点击“是”...");
+                Console.WriteLine("正在请求管理员权限，请在 UAC 弹窗中点击“是”...");
                 try
                 {
                     ProcessStartInfo psi = new ProcessStartInfo();
@@ -707,18 +719,38 @@ namespace CodexAppInstaller
                     psi.FileName = Process.GetCurrentProcess().MainModule.FileName;
                     StringBuilder sb = new StringBuilder();
                     foreach (string a in args) sb.Append(" \"").Append(a.Replace("\"", "\\\"")).Append("\"");
-                    // 透传启动时验证的凭据/决定，避免提权窗口二次输入
-                    if (!SkipApi && Email.Length > 0 && Password.Length > 0)
-                        sb.Append(" \"-Email\" \"").Append(Email.Replace("\"", "\\\""))
-                          .Append("\" \"-Password\" \"").Append(Password.Replace("\"", "\\\"")).Append("\"");
-                    if (preManualKey) sb.Append(" \"-ApiKey\" \"").Append(ApiKey.Replace("\"", "\\\"")).Append("\"");
-                    if (preSkipApi) sb.Append(" \"-SkipApi\"");
-                    psi.Arguments = sb.ToString();
+                    psi.Arguments = sb.ToString();   // 原样透传全部参数（登录在提权后的窗口进行）
                     Process.Start(psi);
                     return 0;
                 }
                 catch (Exception ex) { Console.WriteLine("提权失败: " + ex.Message); Pause(); return 3; }
             }
+
+            // 管理员路径：从这里起就是提权后的新窗口——面板/横幅/登录/安装全部在此进行
+            EnsurePanel();
+            Banner();
+            try { GetArch(); }
+            catch (Exception ex) { Fail(ex.Message); Pause(); return 1; }
+            string token = null;
+            bool manualKey = false;
+            if (!SkipApi && string.IsNullOrEmpty(ApiKey))
+            {
+                token = Sub2apiLoginFlow();
+                if (token == null)
+                {
+                    Console.Write("  是否改用手动粘贴 API Key 完成配置？[Y/n] ");
+                    string ans = SafeReadLine().Trim().ToLower();
+                    if (ans == "" || ans == "y" || ans == "yes")
+                    {
+                        Console.Write("  API Key（格式 sk-xxxxxx）: ");
+                        string mk = SafeReadLine().Trim();
+                        if (mk.Length > 0) { ApiKey = mk; manualKey = true; Ok("将使用手动提供的 API Key。"); }
+                        else { Warn("未提供 Key，将跳过聚合 API 配置。"); }
+                    }
+                    else { Warn("已选择跳过 Xode AI平台 配置，仅安装应用。"); }
+                }
+            }
+            else if (!string.IsNullOrEmpty(ApiKey)) { manualKey = true; }
 
             try
             {
@@ -729,20 +761,8 @@ namespace CodexAppInstaller
                 string arch = GetArch();
                 Ok("系统架构: " + arch);
 
-                // 步骤 1/11：登录 sub2api（启动时已验证 → 直接复用其 token；否则用透传凭据静默登录）
-                string token = startToken;
-                bool manualKey = (ApiKey != null && ApiKey.Trim().Length > 0);
-                if (token == null && !SkipApi && !manualKey)
-                {
-                    token = Sub2apiLoginFlow();
-                    if (token == null)
-                    {
-                        Console.Write("  是否改用手动粘贴 API Key 完成配置？[Y/n] ");
-                        string ans = SafeReadLine().Trim().ToLower();
-                        if (ans == "" || ans == "y" || ans == "yes") manualKey = true;
-                    }
-                }
-                else if (manualKey)
+                // 步骤 1/11（连接/登录 Xode AI平台）已在上方提权后窗口完成（token/manualKey 就绪）
+                if (manualKey)
                 {
                     Ok("使用命令行提供的 API Key（跳过 Xode AI平台 登录）");
                 }
