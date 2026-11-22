@@ -218,7 +218,35 @@ namespace CodexAppInstaller
                     SetCurrentConsoleFontEx(h, false, ref f);
                 }
                 catch { }
-                ResizeWindow(h, 124, 44);
+                // 屏幕自适应：WT 记忆窗口尺寸/屏幕钳制/行高 1.2 等用户设置（客户机 2160×1440@150% +
+                // 行高 1.2 实测）都会使固定目标 124×44 超出屏幕——WT 把窗口钳在屏内只显示顶部几十行，
+                // 而 conhost 的 srWindow 仍报告请求值 → 面板按请求布局整体错位。resize 之前先按初始
+                // 视口实测 cell 像素，算出屏幕可容纳的行列数，把目标收敛进去
+                int targetW = 124, targetH = 44;
+                try
+                {
+                    IntPtr hwnd = GetConsoleWindow();
+                    RECT wr = new RECT(), cr = new RECT();
+                    CONSOLE_SCREEN_BUFFER_INFO info0;
+                    if (hwnd != IntPtr.Zero && GetWindowRect(hwnd, ref wr) && GetClientRect(hwnd, ref cr)
+                        && GetConsoleScreenBufferInfo(h, out info0))
+                    {
+                        int rows0 = info0.srWindow.B - info0.srWindow.T + 1;
+                        int cols0 = info0.srWindow.R - info0.srWindow.L + 1;
+                        int clientH = cr.Bottom - cr.Top, clientW = cr.Right - cr.Left;
+                        if (rows0 > 0 && cols0 > 0 && clientH >= rows0 && clientW >= cols0)
+                        {
+                            int lineH = clientH / rows0, cellW = clientW / cols0;   // 实测 cell 像素（初始视口可信）
+                            int chromeH = (wr.Bottom - wr.Top) - clientH, chromeW = (wr.Right - wr.Left) - clientW;
+                            int maxRows = (GetSystemMetrics(SM_CYFULLSCREEN) - chromeH) / lineH;
+                            int maxCols = (GetSystemMetrics(SM_CXFULLSCREEN) - chromeW) / cellW;
+                            if (maxRows > 0) targetH = Math.Min(targetH, maxRows);
+                            if (maxCols > 0) targetW = Math.Min(targetW, maxCols);
+                        }
+                    }
+                }
+                catch { }
+                ResizeWindow(h, targetW, targetH);
                 SyncViewport(h);
                 DiagSnapshot(h, "setup");
                 int w, hh;
@@ -544,8 +572,18 @@ namespace CodexAppInstaller
             private static extern bool SetCurrentConsoleFontEx(IntPtr hConsoleOutput, bool bMaximumWindow, ref CONSOLE_FONT_INFO_EX lpConsoleCurrentFontEx);
             [DllImport("kernel32.dll")]
             private static extern IntPtr GetConsoleWindow();
+            [DllImport("user32.dll")]
+            private static extern int GetSystemMetrics(int nIndex);
+            [StructLayout(LayoutKind.Sequential)]
+            private struct RECT { public int Left, Top, Right, Bottom; }
+            [DllImport("user32.dll")]
+            private static extern bool GetWindowRect(IntPtr hWnd, ref RECT lpRect);
+            [DllImport("user32.dll")]
+            private static extern bool GetClientRect(IntPtr hWnd, ref RECT lpRect);
 
             private const int StdOutputHandle = -11;
+            private const int SM_CXFULLSCREEN = 16;   // 屏幕宽-任务栏
+            private const int SM_CYFULLSCREEN = 17;   // 屏幕高-任务栏
 
             [StructLayout(LayoutKind.Sequential)]
             private struct COORD
