@@ -2639,7 +2639,7 @@ namespace CodexAppInstaller
         private static readonly MarketSpec[] Markets = new MarketSpec[] {
             new MarketSpec { Repo = "kael-odin/codex-plugins-zh", Branch = "main", CachePrefix = "kzh", SizeDesc = "约 72 MB", MinSize = 50000000, BootstrapCommit = "e3091d1b371a9dcd9455d333175f948b286fdfcf", Kind = "market" },
             new MarketSpec { Repo = "tetexu1994-star/baomiao-codex-skills-marketplace", Branch = "main", CachePrefix = "baomiao", SizeDesc = "约 4.5 MB", MinSize = 2000000, BootstrapCommit = "cb69c4a7e42ddb85227e6f61cc9eb7bf9e1b7df5", Kind = "market" },
-            new MarketSpec { Repo = "dreammis/social-auto-upload", Branch = "main", CachePrefix = "sau", SizeDesc = "约 25 MB", MinSize = 20000000, BootstrapCommit = "3847fff01f5434a8a32829833163cd6723cabc59", Kind = "plugin" }
+            new MarketSpec { Repo = "dreammis/social-auto-upload", Branch = "main", CachePrefix = "sau", SizeDesc = "约 4.6 MB", MinSize = 3000000, BootstrapCommit = "3847fff01f5434a8a32829833163cd6723cabc59", Kind = "plugin" }
         };
         private const string MergedMarketId = "codex-plugins";
         private const string MergedMarketDisplay = "Codex 插件";
@@ -2754,12 +2754,14 @@ namespace CodexAppInstaller
             string repoBase = m.Repo.Substring(m.Repo.IndexOf('/') + 1);
             // GitHub commit 归档根目录 = <仓库名>-<完整commit>
             string marketDir = Path.Combine(mpRoot, repoBase + "-" + m.ResolvedCommit);
-            // 就绪校验按来源类型：标准市场仓库验 marketplace.json；纯插件源仓库验 skills/ 目录
+            // 就绪校验按来源类型：标准市场仓库验 marketplace.json（文件）；纯插件源仓库验 skills/（目录）
+            // 注意：File.Exists 对目录返回 false，必须按类型分别用 File/Directory.Exists
             bool pluginKind = (m.Kind == "plugin");
             string readyMark = pluginKind
                 ? Path.Combine(marketDir, "skills")
                 : Path.Combine(marketDir, ".agents", "plugins", "marketplace.json");
-            if (!versionChanged && File.Exists(readyMark))
+            Func<string, bool> markReady = delegate(string p) { return File.Exists(p) || Directory.Exists(p); };
+            if (!versionChanged && markReady(readyMark))
             {
                 Ok("市场版本未变化（" + m.CachePrefix + " " + m.ResolvedCommit.Substring(0, 8) + "），跳过下载与解压");
                 return;
@@ -2804,7 +2806,7 @@ namespace CodexAppInstaller
                 // 官方中文版仓库带约 35MB 网页资源（site/），Codex 用不到，解压后删除省磁盘
                 string siteDir = Path.Combine(marketDir, "site");
                 if (Directory.Exists(siteDir)) { try { Directory.Delete(siteDir, true); } catch { } }
-                if (!File.Exists(readyMark)) { try { File.Delete(zipPath); } catch { } throw new Exception(pluginKind ? "解压后未找到 skills 目录" : "解压后未找到 marketplace.json"); }
+                if (!markReady(readyMark)) { try { File.Delete(zipPath); } catch { } throw new Exception(pluginKind ? "解压后未找到 skills 目录" : "解压后未找到 marketplace.json"); }
             }
             WriteMarketVersion(mpRoot, m.CachePrefix, m.ResolvedCommit);
             Ok("市场来源就绪: " + m.CachePrefix + " @ " + m.ResolvedCommit.Substring(0, 8) + (versionChanged ? "（已更新）" : "（已恢复）"));
